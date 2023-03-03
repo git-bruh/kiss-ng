@@ -40,6 +40,25 @@ libkiss_ng = static_library(
     install: true,
 )
 
+if get_option('tests')
+    unity_proj = subproject('unity', default_options: ['werror=false'])
+    unity_dep = unity_proj.get_variable('unity_dep')
+
+    tests = ['log']
+
+    foreach test : tests
+        exe = executable(
+            test,
+            'tests/@0@.c'.format(test),
+            dependencies: unity_dep,
+            link_with: libkiss_ng,
+            include_directories: incdirs,
+        )
+
+        test(test, exe)
+    endforeach
+endif
+
 executable(
     'kiss-ng',
     'src/kiss-ng.c',
