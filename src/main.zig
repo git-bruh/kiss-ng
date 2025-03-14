@@ -4,9 +4,9 @@ const KISS_COLOR_PRIMARY = "\x1b[1;33m";
 const KISS_COLOR_SECONDARY = "\x1b[1;34m";
 const KISS_COLOR_CLEAR = "\x1b[m";
 
-pub const std_options = struct {
-    pub const log_level = .debug;
-    pub const logFn = log;
+pub const std_options: std.Options = .{
+    .log_level = .debug,
+    .logFn = log,
 };
 
 fn toUpper(comptime str: []const u8) [str.len]u8 {
@@ -21,7 +21,7 @@ fn toUpper(comptime str: []const u8) [str.len]u8 {
 
 pub fn log(
     comptime level: std.log.Level,
-    comptime scope: @Type(.EnumLiteral),
+    comptime scope: @Type(.enum_literal),
     comptime format: []const u8,
     args: anytype,
 ) void {
@@ -41,8 +41,8 @@ pub fn log(
         },
     ) ++ format ++ "\n";
 
-    std.debug.getStderrMutex().lock();
-    defer std.debug.getStderrMutex().unlock();
+    std.debug.lockStdErr();
+    defer std.debug.unlockStdErr();
 
     const stderr = std.io.getStdErr();
     const writer = stderr.writer();
