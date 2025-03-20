@@ -1,3 +1,5 @@
+const std = @import("std");
+
 /// A dependency can either be build time (needed just for building the package)
 /// or runtime (needed both at build time and runtime)
 /// They are read from the newline delimited `depends` file
@@ -26,18 +28,19 @@ const Dependency = struct {
 ///     files/config extras
 const Source = union(enum) {
     Git: struct {
+        build_path: ?[]const u8,
         clone_url: []const u8,
-        commit_hash: []const u8,
+        commit_hash: ?[]const u8,
     },
     Http: struct {
-        fetch_url: []const u8,
         build_path: ?[]const u8,
-        checksum: ?[]const u8,
+        fetch_url: []const u8,
+        checksum: []const u8,
     },
     Local: struct {
-        path: []const u8,
         build_path: ?[]const u8,
-        checksum: ?[]const u8,
+        path: []const u8,
+        checksum: []const u8,
     },
 };
 
@@ -52,8 +55,116 @@ const Source = union(enum) {
 ///  5. version: Version of the package, can be any arbritary string
 pub const Package = struct {
     name: []const u8,
-    build_exe: []const u8,
     version: []const u8,
-    dependencies: []Dependency,
-    sources: []Source,
+    // backing allocated content for sources and dependencies
+    backing_contents: [3][]const u8,
+    dependencies: std.ArrayList(Dependency),
+    sources: std.ArrayList(Source),
+    dir: std.fs.Dir,
+    allocator: std.mem.Allocator,
+
+    pub fn new(allocator: std.mem.Allocator, dir: std.fs.Dir, name: []const u8) !Package {
+        const version = try read_until_end(allocator, dir, "version");
+        errdefer allocator.free(version);
+
+        const depends = try read_until_end(allocator, dir, "depends");
+        errdefer allocator.free(depends);
+
+        const sources = try read_until_end(allocator, dir, "sources");
+        errdefer allocator.free(sources);
+
+        const checksums = try read_until_end(allocator, dir, "checksums");
+        errdefer allocator.free(checksums);
+
+        const sourcesArray = try parse_sources(allocator, sources, checksums);
+        errdefer sourcesArray.deinit();
+
+        const dependencies = try parse_dependencies(allocator, depends);
+        errdefer dependencies.deinit();
+
+        return Package{
+            .name = try allocator.dupe(u8, name),
+            .version = version,
+            .backing_contents = .{ depends, sources, checksums },
+            .dependencies = dependencies,
+            .sources = sourcesArray,
+            .dir = dir,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn free(self: *Package) void {
+        self.allocator.free(self.name);
+        self.allocator.free(self.version);
+        for (self.backing_contents) |bytes| {
+            self.allocator.free(bytes);
+        }
+        self.dependencies.deinit();
+        self.sources.deinit();
+        self.dir.close();
+    }
 };
+
+fn parse_sources(allocator: std.mem.Allocator, sources: []const u8, checksums: []const u8) !std.ArrayList(Source) {
+    var sourceIter = std.mem.splitScalar(u8, sources, '\n');
+    var checksumIter = std.mem.splitScalar(u8, checksums, '\n');
+
+    var sourceArray = std.ArrayList(Source).init(allocator);
+    errdefer sourceArray.deinit();
+
+    while (sourceIter.next()) |sourceBuf| {
+        var iter = std.mem.splitScalar(u8, sourceBuf, ' ');
+
+        const source = iter.next() orelse unreachable;
+        const build_path = iter.next();
+
+        if (std.mem.startsWith(u8, source, "git+")) {
+            var cloneCommitIter = std.mem.splitScalar(u8, source, '#');
+
+            const cloneUrl = cloneCommitIter.next() orelse unreachable;
+            const commitHash = cloneCommitIter.next();
+
+            try sourceArray.append(.{
+                .Git = .{ .build_path = build_path, .clone_url = cloneUrl, .commit_hash = commitHash },
+            });
+            continue;
+        }
+
+        const checksum = checksumIter.next() orelse unreachable;
+
+        if (std.mem.containsAtLeast(u8, source, 1, "://")) {
+            try sourceArray.append(.{
+                .Http = .{ .build_path = build_path, .fetch_url = source, .checksum = checksum },
+            });
+        } else {
+            try sourceArray.append(.{
+                .Local = .{ .build_path = build_path, .path = source, .checksum = checksum },
+            });
+        }
+    }
+
+    return sourceArray;
+}
+
+fn parse_dependencies(allocator: std.mem.Allocator, depends: []const u8) !std.ArrayList(Dependency) {
+    var dependencies = std.ArrayList(Dependency).init(allocator);
+
+    var iter = std.mem.splitScalar(u8, depends, '\n');
+    while (iter.next()) |dependency| {
+        var nameMakeIter = std.mem.splitScalar(u8, dependency, ' ');
+        const name = nameMakeIter.next() orelse unreachable;
+        try dependencies.append(Dependency{
+            .name = name,
+            .kind = if (nameMakeIter.next() == null) .Runtime else .Build,
+        });
+    }
+
+    return dependencies;
+}
+
+fn read_until_end(allocator: std.mem.Allocator, dir: std.fs.Dir, name: []const u8) ![]const u8 {
+    const file = try dir.openFile(name, .{});
+    defer file.close();
+
+    return try file.readToEndAlloc(allocator, 1 << 16);
+}
