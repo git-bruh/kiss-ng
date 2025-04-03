@@ -1,5 +1,6 @@
 const std = @import("std");
 const types = @import("package.zig");
+const dag = @import("dag_zig");
 
 const KISS_COLOR_PRIMARY = "\x1b[1;33m";
 const KISS_COLOR_SECONDARY = "\x1b[1;34m";
@@ -75,39 +76,43 @@ const PkgManager = struct {
         unreachable;
     }
 
-    fn construct_dependency_tree(self: *PkgManager, pkg_map: *std.StringHashMap(types.Package), pkg_name: ?[]const u8) !void {
-        var dir = if (pkg_name != null) try self.find_in_path(pkg_name.?) else try std.fs.openDirAbsolute(".", .{ .access_sub_paths = true, .iterate = true });
+    fn construct_dependency_tree(self: *PkgManager, pkg_map: *std.StringHashMap(types.Package), pkg_dag: *dag.DAG([]const u8), pkg_name: ?[]const u8) !void {
+        var dir = if (pkg_name != null) try self.find_in_path(pkg_name.?) else try std.fs.cwd().openDir(".", .{ .access_sub_paths = true, .iterate = true });
         errdefer dir.close();
 
-        const inBuf: [std.fs.max_path_bytes]u8 = @splat(0);
-        const outBuf: [std.fs.max_path_bytes]u8 = @splat(0);
+        var inBuf: [std.fs.max_path_bytes]u8 = @splat(0);
+        var outBuf: [std.fs.max_path_bytes]u8 = @splat(0);
         const pkgDirname = std.fs.path.dirname(try std.fs.readLinkAbsolute(
-            try std.fmt.bufPrint(@constCast(&inBuf), "/proc/self/fd/{d}", .{dir.fd}),
-            @constCast(&outBuf),
+            try std.fmt.bufPrint(&inBuf, "/proc/self/fd/{d}", .{dir.fd}),
+            &outBuf,
         )) orelse unreachable;
 
         var package = try types.Package.new(self.allocator, dir, pkgDirname);
         errdefer package.free();
 
+        try pkg_map.putNoClobber(package.name, package);
+
         for (package.dependencies.items) |dependency| {
-            // append to graph
+            try pkg_dag.add_child(package.name, dependency.name);
 
             if (pkg_map.contains(dependency.name)) {
-                std.log.debug("dependency {s} of {s} already parsed, skipping", .{ dependency.name, pkgDirname });
+                std.log.debug("dependency {s} of {s} already parsed, skipping", .{ dependency.name, package.name });
                 continue;
             }
 
-            try construct_dependency_tree(self, pkg_map, dependency.name);
+            std.log.debug("looking up dependency {s} of {s}", .{ dependency.name, package.name });
+            try self.construct_dependency_tree(pkg_map, pkg_dag, dependency.name);
         }
-
-        try pkg_map.putNoClobber(pkgDirname, package);
     }
 
     pub fn build(self: *PkgManager, pkg_name: ?[]const u8) !void {
         var pkg_map = std.StringHashMap(types.Package).init(self.allocator);
         defer pkg_map.deinit();
 
-        try self.construct_dependency_tree(&pkg_map, pkg_name);
+        var pkg_dag = dag.DAG([]const u8).init(self.allocator);
+        defer pkg_dag.deinit();
+
+        try self.construct_dependency_tree(&pkg_map, &pkg_dag, pkg_name);
     }
 };
 

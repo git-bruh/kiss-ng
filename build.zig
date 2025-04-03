@@ -33,6 +33,12 @@ pub fn build(b: *std.Build) void {
         .root_module = exe_mod,
     });
 
+    const dag_zig = b.dependency("dag_zig", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    exe.root_module.addImport("dag_zig", dag_zig.module("dag_zig"));
+
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
     // step when running `zig build`).

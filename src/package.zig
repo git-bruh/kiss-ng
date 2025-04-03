@@ -57,7 +57,7 @@ pub const Package = struct {
     name: []const u8,
     version: []const u8,
     // backing allocated content for sources and dependencies
-    backing_contents: [3][]const u8,
+    backing_contents: [3]?[]const u8,
     dependencies: std.ArrayList(Dependency),
     sources: std.ArrayList(Source),
     dir: std.fs.Dir,
@@ -67,8 +67,11 @@ pub const Package = struct {
         const version = try read_until_end(allocator, dir, "version");
         errdefer allocator.free(version);
 
-        const depends = try read_until_end(allocator, dir, "depends");
-        errdefer allocator.free(depends);
+        const depends = read_until_end(allocator, dir, "depends") catch |err| switch (err) {
+            error.FileNotFound => null,
+            else => return err,
+        };
+        errdefer if (depends != null) allocator.free(depends.?);
 
         const sources = try read_until_end(allocator, dir, "sources");
         errdefer allocator.free(sources);
@@ -79,7 +82,7 @@ pub const Package = struct {
         const sourcesArray = try parse_sources(allocator, sources, checksums);
         errdefer sourcesArray.deinit();
 
-        const dependencies = try parse_dependencies(allocator, depends);
+        const dependencies = try parse_dependencies(allocator, depends orelse "");
         errdefer dependencies.deinit();
 
         return Package{
@@ -97,7 +100,7 @@ pub const Package = struct {
         self.allocator.free(self.name);
         self.allocator.free(self.version);
         for (self.backing_contents) |bytes| {
-            self.allocator.free(bytes);
+            if (bytes != null) self.allocator.free(bytes.?);
         }
         self.dependencies.deinit();
         self.sources.deinit();
@@ -153,6 +156,7 @@ fn parse_dependencies(allocator: std.mem.Allocator, depends: []const u8) !std.Ar
     while (iter.next()) |dependency| {
         var nameMakeIter = std.mem.splitScalar(u8, dependency, ' ');
         const name = nameMakeIter.next() orelse unreachable;
+        if (std.mem.eql(u8, name, "")) continue;
         try dependencies.append(Dependency{
             .name = name,
             .kind = if (nameMakeIter.next() == null) .Runtime else .Build,
