@@ -113,6 +113,11 @@ const PkgManager = struct {
         defer pkg_dag.deinit();
 
         try self.construct_dependency_tree(&pkg_map, &pkg_dag, pkg_name);
+
+        var it = pkg_map.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.free();
+        }
     }
 };
 
