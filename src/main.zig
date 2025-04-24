@@ -1,4 +1,5 @@
 const std = @import("std");
+const config = @import("config.zig");
 const types = @import("package.zig");
 const dag = @import("dag_zig");
 
@@ -57,10 +58,17 @@ pub fn log(
 
 const PkgManager = struct {
     allocator: std.mem.Allocator,
-    kiss_path: ?[][]const u8,
+    kiss_config: config.Config,
+
+    const PackageFindError = error{
+        PackageNotFound,
+    };
 
     fn find_in_path(self: *PkgManager, pkg_name: []const u8) !std.fs.Dir {
-        for (self.kiss_path.?) |path| {
+        var it = std.mem.splitScalar(u8, self.kiss_config.path, ':');
+        while (it.next()) |path| {
+            if (std.mem.eql(u8, path, "")) continue;
+
             const pkg_path = try std.mem.concat(self.allocator, u8, &.{ path, "/", pkg_name });
             defer self.allocator.free(pkg_path);
 
@@ -73,7 +81,8 @@ const PkgManager = struct {
             return dir;
         }
 
-        unreachable;
+        std.log.debug("package {s} not found in any path", .{pkg_name});
+        return PackageFindError.PackageNotFound;
     }
 
     fn construct_dependency_tree(self: *PkgManager, pkg_map: *std.StringHashMap(types.Package), pkg_dag: *dag.DAG([]const u8), pkg_name: ?[]const u8) !void {
@@ -82,12 +91,12 @@ const PkgManager = struct {
 
         var inBuf: [std.fs.max_path_bytes]u8 = @splat(0);
         var outBuf: [std.fs.max_path_bytes]u8 = @splat(0);
-        const pkgDirname = std.fs.path.dirname(try std.fs.readLinkAbsolute(
+        const pkg_basename = std.fs.path.basename(try std.fs.readLinkAbsolute(
             try std.fmt.bufPrint(&inBuf, "/proc/self/fd/{d}", .{dir.fd}),
             &outBuf,
-        )) orelse unreachable;
+        ));
 
-        var package = try types.Package.new(self.allocator, dir, pkgDirname);
+        var package = try types.Package.new(self.allocator, dir, pkg_basename);
         errdefer package.free();
 
         try pkg_map.putNoClobber(package.name, package);
@@ -116,8 +125,17 @@ const PkgManager = struct {
 
         var it = pkg_map.iterator();
         while (it.next()) |entry| {
+            std.log.debug("got entry {s}", .{entry.value_ptr.name});
             entry.value_ptr.free();
         }
+    }
+
+    pub fn new(allocator: std.mem.Allocator, kiss_config: config.Config) PkgManager {
+        return .{ .allocator = allocator, .kiss_config = kiss_config };
+    }
+
+    pub fn free(self: *PkgManager) void {
+        self.kiss_config.free();
     }
 };
 
@@ -131,7 +149,8 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     defer if (gpa.deinit() == .leak) unreachable;
 
-    var pkg_man: PkgManager = .{ .allocator = allocator, .kiss_path = null };
+    var pkg_man = PkgManager.new(allocator, try config.Config.new_from_env(allocator));
+    defer pkg_man.free();
 
     if (std.mem.eql(u8, std.mem.sliceTo(std.os.argv[1], 0), "build")) {
         try pkg_man.build(if (std.os.argv.len > 2) std.mem.sliceTo(std.os.argv[2], 0) else null);
