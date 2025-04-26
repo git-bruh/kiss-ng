@@ -85,7 +85,7 @@ const PkgManager = struct {
         return PackageFindError.PackageNotFound;
     }
 
-    fn construct_dependency_tree(self: *PkgManager, pkg_map: *std.StringHashMap(types.Package), pkg_dag: *dag.DAG([]const u8), pkg_name: ?[]const u8) !void {
+    fn construct_dependency_tree(self: *PkgManager, pkg_map: *std.StringHashMap(types.Package), pkg_dag: *dag.DAG([]const u8), pkg_name: ?[]const u8) ![]const u8 {
         var dir = if (pkg_name != null) try self.find_in_path(pkg_name.?) else try std.fs.cwd().openDir(".", .{ .access_sub_paths = true, .iterate = true });
         errdefer dir.close();
 
@@ -100,6 +100,7 @@ const PkgManager = struct {
         errdefer package.free();
 
         try pkg_map.putNoClobber(package.name, package);
+        try pkg_dag.add_child(package.name, null);
 
         for (package.dependencies.items) |dependency| {
             try pkg_dag.add_child(package.name, dependency.name);
@@ -110,23 +111,32 @@ const PkgManager = struct {
             }
 
             std.log.debug("looking up dependency {s} of {s}", .{ dependency.name, package.name });
-            try self.construct_dependency_tree(pkg_map, pkg_dag, dependency.name);
+            _ = try self.construct_dependency_tree(pkg_map, pkg_dag, dependency.name);
         }
+
+        return package.name;
     }
 
     pub fn build(self: *PkgManager, pkg_name: ?[]const u8) !void {
         var pkg_map = std.StringHashMap(types.Package).init(self.allocator);
-        defer pkg_map.deinit();
+        defer {
+            var it = pkg_map.iterator();
+            while (it.next()) |entry| entry.value_ptr.free();
+            pkg_map.deinit();
+        }
 
         var pkg_dag = dag.DAG([]const u8).init(self.allocator);
         defer pkg_dag.deinit();
 
-        try self.construct_dependency_tree(&pkg_map, &pkg_dag, pkg_name);
+        const root_pkg = try self.construct_dependency_tree(&pkg_map, &pkg_dag, pkg_name);
 
-        var it = pkg_map.iterator();
-        while (it.next()) |entry| {
-            std.log.debug("got entry {s}", .{entry.value_ptr.name});
-            entry.value_ptr.free();
+        var sorted = std.ArrayList([]const u8).init(self.allocator);
+        defer sorted.deinit();
+
+        try pkg_dag.tsort(root_pkg, &sorted);
+
+        for (sorted.items, 0..) |item, idx| {
+            std.log.debug("Build Order: {d}, Package: {s}", .{ idx, item });
         }
     }
 
