@@ -64,22 +64,19 @@ pub const Package = struct {
     allocator: std.mem.Allocator,
 
     pub fn new(allocator: std.mem.Allocator, dir: std.fs.Dir, name: []const u8) !Package {
-        const version = try read_until_end(allocator, dir, "version");
+        const version = try read_until_end(allocator, dir, "version") orelse return error.FileNotFound;
         errdefer allocator.free(version);
 
-        const depends = read_until_end(allocator, dir, "depends") catch |err| switch (err) {
-            error.FileNotFound => null,
-            else => return err,
-        };
+        const depends = try read_until_end(allocator, dir, "depends");
         errdefer if (depends != null) allocator.free(depends.?);
 
         const sources = try read_until_end(allocator, dir, "sources");
-        errdefer allocator.free(sources);
+        errdefer if (sources != null) allocator.free(sources.?);
 
         const checksums = try read_until_end(allocator, dir, "checksums");
-        errdefer allocator.free(checksums);
+        errdefer if (checksums != null) allocator.free(checksums.?);
 
-        const sourcesArray = try parse_sources(allocator, sources, checksums);
+        const sourcesArray = try parse_sources(allocator, sources orelse "", checksums orelse "");
         errdefer sourcesArray.deinit();
 
         const dependencies = try parse_dependencies(allocator, depends orelse "");
@@ -120,6 +117,11 @@ fn parse_sources(allocator: std.mem.Allocator, sources: []const u8, checksums: [
 
         const source = iter.next() orelse unreachable;
         const build_path = iter.next();
+
+        // Ignore empty lines and comments
+        if (std.mem.startsWith(u8, source, "") or std.mem.startsWith(u8, source, "#")) {
+            continue;
+        }
 
         if (std.mem.startsWith(u8, source, "git+")) {
             var cloneCommitIter = std.mem.splitScalar(u8, source, '#');
@@ -166,8 +168,11 @@ fn parse_dependencies(allocator: std.mem.Allocator, depends: []const u8) !std.Ar
     return dependencies;
 }
 
-fn read_until_end(allocator: std.mem.Allocator, dir: std.fs.Dir, name: []const u8) ![]const u8 {
-    const file = try dir.openFile(name, .{});
+fn read_until_end(allocator: std.mem.Allocator, dir: std.fs.Dir, name: []const u8) !?[]const u8 {
+    const file = dir.openFile(name, .{}) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
     defer file.close();
 
     return try file.readToEndAlloc(allocator, 1 << 16);
