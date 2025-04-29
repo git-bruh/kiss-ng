@@ -1,7 +1,7 @@
 const std = @import("std");
 const config = @import("config.zig");
-const types = @import("package.zig");
-const dag = @import("dag_zig");
+const commands = @import("commands.zig");
+const pkg_manager = @import("package_manager.zig");
 
 const KISS_COLOR_PRIMARY = "\x1b[1;33m";
 const KISS_COLOR_SECONDARY = "\x1b[1;34m";
@@ -22,7 +22,7 @@ fn toUpper(comptime str: []const u8) [str.len]u8 {
     return out;
 }
 
-pub fn log(
+fn log(
     comptime level: std.log.Level,
     comptime scope: @Type(.enum_literal),
     comptime format: []const u8,
@@ -31,18 +31,27 @@ pub fn log(
     const log_level = comptime toUpper(level.asText());
     const log_scope = @tagName(scope);
 
+    _ = log_scope;
+
+    // Custom {ks} format specifier for highlighting log details
+    comptime var clean_format: [format.len]u8 = @splat(0);
+    _ = comptime std.mem.replace(u8, format, "{ks}", "{s}", &clean_format);
+
+    const fmt_specifier = KISS_COLOR_SECONDARY ++ "{s}" ++ KISS_COLOR_CLEAR;
+    comptime var tty_format: [format.len + fmt_specifier.len]u8 = @splat(0);
+    _ = comptime std.mem.replace(u8, format, "{ks}", fmt_specifier, &tty_format);
+
     const fmt_clean = comptime std.fmt.comptimePrint(
-        "[{s}] ({s}) ",
-        .{ log_level, log_scope },
-    ) ++ format ++ "\n";
+        "[{s}] ",
+        .{log_level},
+    ) ++ clean_format ++ "\n";
 
     const fmt_tty = comptime std.fmt.comptimePrint(
-        "{s}[{s}]{s} {s}({s}){s} ",
+        "{s}[{s}]{s} ",
         .{
-            KISS_COLOR_PRIMARY,   log_level, KISS_COLOR_CLEAR,
-            KISS_COLOR_SECONDARY, log_scope, KISS_COLOR_CLEAR,
+            KISS_COLOR_PRIMARY, log_level, KISS_COLOR_CLEAR,
         },
-    ) ++ format ++ "\n";
+    ) ++ tty_format ++ "\n";
 
     std.debug.lockStdErr();
     defer std.debug.unlockStdErr();
@@ -56,121 +65,41 @@ pub fn log(
         writer.print(fmt_clean, args)) catch return;
 }
 
-const PkgManager = struct {
-    allocator: std.mem.Allocator,
-    kiss_config: config.Config,
-
-    const PackageFindError = error{
-        PackageNotFound,
-    };
-
-    fn find_in_path(self: *PkgManager, pkg_name: []const u8) !std.fs.Dir {
-        var it = std.mem.splitScalar(u8, self.kiss_config.path, ':');
-        while (it.next()) |path| {
-            if (std.mem.eql(u8, path, "")) continue;
-
-            const pkg_path = try std.mem.concat(self.allocator, u8, &.{ path, "/", pkg_name });
-            defer self.allocator.free(pkg_path);
-
-            std.log.debug("finding package in path {s}", .{pkg_path});
-
-            const dir = std.fs.openDirAbsolute(pkg_path, .{ .access_sub_paths = true, .iterate = true }) catch |err| {
-                std.log.debug("failed to find package at path {s}: {}", .{ pkg_path, err });
-                continue;
-            };
-            return dir;
-        }
-
-        std.log.debug("package {s} not found in any path", .{pkg_name});
-        return PackageFindError.PackageNotFound;
-    }
-
-    fn construct_dependency_tree(self: *PkgManager, pkg_map: *std.StringHashMap(types.Package), pkg_dag: *dag.DAG([]const u8), pkg_name: ?[]const u8) ![]const u8 {
-        var dir = if (pkg_name != null) try self.find_in_path(pkg_name.?) else try std.fs.cwd().openDir(".", .{ .access_sub_paths = true, .iterate = true });
-        errdefer dir.close();
-
-        var inBuf: [std.fs.max_path_bytes]u8 = @splat(0);
-        var outBuf: [std.fs.max_path_bytes]u8 = @splat(0);
-        const pkg_basename = std.fs.path.basename(try std.fs.readLinkAbsolute(
-            try std.fmt.bufPrint(&inBuf, "/proc/self/fd/{d}", .{dir.fd}),
-            &outBuf,
-        ));
-
-        var package = try types.Package.new(self.allocator, dir, pkg_basename);
-        errdefer package.free();
-
-        try pkg_map.putNoClobber(package.name, package);
-        try pkg_dag.add_child(package.name, null);
-
-        for (package.dependencies.items) |dependency| {
-            try pkg_dag.add_child(package.name, dependency.name);
-
-            if (pkg_map.contains(dependency.name)) {
-                std.log.debug("dependency {s} of {s} already parsed, skipping", .{ dependency.name, package.name });
-                continue;
-            }
-
-            std.log.debug("looking up dependency {s} of {s}", .{ dependency.name, package.name });
-            _ = try self.construct_dependency_tree(pkg_map, pkg_dag, dependency.name);
-        }
-
-        return package.name;
-    }
-
-    pub fn build(self: *PkgManager, pkg_name: ?[]const u8) !void {
-        var pkg_map = std.StringHashMap(types.Package).init(self.allocator);
-        defer {
-            var it = pkg_map.iterator();
-            while (it.next()) |entry| entry.value_ptr.free();
-            pkg_map.deinit();
-        }
-
-        var pkg_dag = dag.DAG([]const u8).init(self.allocator);
-        defer pkg_dag.deinit();
-
-        const root_pkg = try self.construct_dependency_tree(&pkg_map, &pkg_dag, pkg_name);
-
-        var sorted = std.ArrayList([]const u8).init(self.allocator);
-        defer sorted.deinit();
-
-        try pkg_dag.tsort(root_pkg, &sorted);
-
-        for (sorted.items, 0..) |item, idx| {
-            std.log.debug("Build Order: {d}, Package: {s}", .{ idx, item });
-        }
-    }
-
-    pub fn new(allocator: std.mem.Allocator, kiss_config: config.Config) PkgManager {
-        return .{ .allocator = allocator, .kiss_config = kiss_config };
-    }
-
-    pub fn free(self: *PkgManager) void {
-        self.kiss_config.free();
-    }
-};
-
 pub fn main() !void {
     if (std.os.argv.len < 2) {
-        std.log.err("too few arguments provided", .{});
-        std.process.exit(1);
+        try std.io.getStdOut().writer().print(
+            \\-> kiss [a|b|c|d|i|l|p|r|s|u|U|v] [pkg]... 
+            \\-> alternatives List and swap alternatives 
+            \\-> build        Build packages 
+            \\-> checksum     Generate checksums 
+            \\-> download     Download sources 
+            \\-> install      Install packages 
+            \\-> list         List installed packages 
+            \\-> preferred    List owners of files with alternatives 
+            \\-> remove       Remove packages 
+            \\-> search       Search for packages 
+            \\-> update       Update the repositories 
+            \\-> upgrade      Update the system 
+            \\-> version      Package manager version 
+            \\
+        , .{});
+        std.process.exit(0);
     }
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
     defer if (gpa.deinit() == .leak) unreachable;
 
-    var pkg_man = PkgManager.new(allocator, try config.Config.new_from_env(allocator));
+    var pkg_man = pkg_manager.PackageManager.new(allocator, try config.Config.new_from_env(allocator));
     defer pkg_man.free();
 
-    if (std.mem.eql(u8, std.mem.sliceTo(std.os.argv[1], 0), "build")) {
-        try pkg_man.build(if (std.os.argv.len > 2) std.mem.sliceTo(std.os.argv[2], 0) else null);
-    } else {
-        std.log.err("unknown command {s}", .{std.os.argv[1]});
-        std.process.exit(1);
+    const args = try allocator.alloc([]const u8, std.os.argv.len - 1);
+    defer allocator.free(args);
+
+    for (std.os.argv[1..], 0..) |arg, idx| {
+        args[idx] = std.mem.sliceTo(arg, 0);
     }
 
-    std.log.info(
-        "Soon™️",
-        .{},
-    );
+    const command = commands.parse_command(args) catch std.process.exit(1);
+    try pkg_man.handle(command);
 }
