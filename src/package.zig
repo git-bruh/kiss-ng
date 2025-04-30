@@ -63,8 +63,18 @@ pub const Package = struct {
     dir: std.fs.Dir,
     allocator: std.mem.Allocator,
 
-    pub fn new(allocator: std.mem.Allocator, dir: std.fs.Dir, name: []const u8) !Package {
+    pub fn new(allocator: std.mem.Allocator, dir: *std.fs.Dir) !Package {
+        errdefer dir.close();
+
+        var inBuf: [std.fs.max_path_bytes]u8 = @splat(0);
+        var outBuf: [std.fs.max_path_bytes]u8 = @splat(0);
+        const name = std.fs.path.basename(try std.fs.readLinkAbsolute(
+            try std.fmt.bufPrint(&inBuf, "/proc/self/fd/{d}", .{dir.fd}),
+            &outBuf,
+        ));
+
         const version = try read_until_end(allocator, dir, "version") orelse return error.FileNotFound;
+        std.mem.replaceScalar(u8, version, ' ', '-');
         errdefer allocator.free(version);
 
         const depends = try read_until_end(allocator, dir, "depends");
@@ -88,7 +98,7 @@ pub const Package = struct {
             .backing_contents = .{ depends, sources, checksums },
             .dependencies = dependencies,
             .sources = sourcesArray,
-            .dir = dir,
+            .dir = .{ .fd = dir.fd },
             .allocator = allocator,
         };
     }
@@ -168,7 +178,7 @@ fn parse_dependencies(allocator: std.mem.Allocator, depends: []const u8) !std.Ar
     return dependencies;
 }
 
-fn read_until_end(allocator: std.mem.Allocator, dir: std.fs.Dir, name: []const u8) !?[]const u8 {
+fn read_until_end(allocator: std.mem.Allocator, dir: *std.fs.Dir, name: []const u8) !?[]u8 {
     const file = dir.openFile(name, .{}) catch |err| switch (err) {
         error.FileNotFound => return null,
         else => return err,

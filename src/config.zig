@@ -1,5 +1,8 @@
 const std = @import("std");
 
+pub const DB_PATH = "var/db/kiss";
+pub const DB_PATH_INSTALLED = DB_PATH ++ "/installed";
+
 pub const Config = struct {
     allocator: std.mem.Allocator,
 
@@ -24,14 +27,18 @@ pub const Config = struct {
     strip: bool,
 
     pub fn new_from_env(allocator: std.mem.Allocator) !Config {
-        const path = try std.process.getEnvVarOwned(allocator, "KISS_PATH");
-        errdefer allocator.free(path);
-
         const root = std.process.getEnvVarOwned(allocator, "KISS_ROOT") catch |err| switch (err) {
             error.EnvironmentVariableNotFound => null,
             else => return err,
         };
         errdefer if (root != null) allocator.free(root.?);
+
+        const path = try std.fmt.allocPrint(allocator, "{s}:{s}{s}", .{
+            std.posix.getenv("KISS_PATH") orelse "",
+            root orelse "/",
+            DB_PATH_INSTALLED,
+        });
+        errdefer allocator.free(path);
 
         const tmpdir = std.process.getEnvVarOwned(allocator, "KISS_TMPDIR") catch |err| switch (err) {
             error.EnvironmentVariableNotFound => null,
