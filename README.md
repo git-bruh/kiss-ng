@@ -10,9 +10,9 @@ Next generation of the [KISS](https://codeberg.org/kiss-community/kiss) package 
   - [ ] run as unprivileged user
   - [ ] sandboxed builds using [`landlock`](https://landlock.io)
 
-- [ ] checksum
+- [x] checksum
 
-- [ ] download
+- [x] download
   - [ ] parallel downloads
 
 - [ ] install
@@ -20,24 +20,24 @@ Next generation of the [KISS](https://codeberg.org/kiss-community/kiss) package 
   - [ ] binary stripping
   - [ ] conflicts
 
-- [ ] list
+- [x] list
 
 - [ ] remove
 
-- [ ] search
+- [x] search
 
-- [ ] update
+- [x] update
 
-- [ ] upgrade
+- [x] upgrade
 
 - [ ] hooks
 
 - [ ] provides system
 
 - [ ] environment variables
-  - [ ] `KISS_ROOT`
+  - [x] `KISS_ROOT`
   - [ ] `KISS_COMPRESS`
-  - [ ] `KISS_PATH`
+  - [x] `KISS_PATH`
   - [ ] `KISS_COLOR`
   - [ ] `KISS_DEBUG`
   - [ ] `KISS_FORCE`
