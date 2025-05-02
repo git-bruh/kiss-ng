@@ -156,7 +156,7 @@ pub const PackageManager = struct {
                     var pkg = try types.Package.new(self.allocator, &dir);
                     defer pkg.free();
 
-                    _ = try pkg.checksum_verify();
+                    if (!try pkg.download(true)) return;
                 }
             },
             .Download => |download| {
@@ -165,7 +165,7 @@ pub const PackageManager = struct {
                     var pkg = try types.Package.new(self.allocator, &dir);
                     defer pkg.free();
 
-                    _ = try pkg.download(false);
+                    if (!try pkg.download(false)) return;
                 }
             },
             .Install => |install| {

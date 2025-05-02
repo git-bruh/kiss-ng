@@ -39,12 +39,12 @@ const Source = union(enum) {
     Http: struct {
         build_path: ?[]const u8,
         fetch_url: []const u8,
-        checksum: []const u8,
+        checksum: ?[]const u8,
     },
     Local: struct {
         build_path: ?[]const u8,
         path: []const u8,
-        checksum: []const u8,
+        checksum: ?[]const u8,
     },
 };
 
@@ -126,7 +126,10 @@ pub const Package = struct {
                     var b3sum: checksum.CHECKSUM = undefined;
                     try checksum.b3sum(file, &b3sum);
 
-                    if (std.mem.eql(u8, &b3sum, http.checksum)) {
+                    if (std.mem.eql(u8, &b3sum, http.checksum orelse {
+                        std.log.err("no checksum present for file {ks}", .{file_name});
+                        return false;
+                    })) {
                         std.log.info("checksum matched {ks} {ks}", .{ b3sum, file_name });
                     } else {
                         std.log.info("checksum mismatch {ks} {ks}", .{ b3sum, file_name });
@@ -143,7 +146,10 @@ pub const Package = struct {
                     var b3sum: checksum.CHECKSUM = undefined;
                     try checksum.b3sum(file, &b3sum);
 
-                    if (std.mem.eql(u8, &b3sum, local.checksum)) {
+                    if (std.mem.eql(u8, &b3sum, local.checksum orelse {
+                        std.log.err("no checksum present for file {ks}", .{local.path});
+                        return false;
+                    })) {
                         std.log.info("checksum matched {ks} {ks}", .{ b3sum, local.path });
                     } else {
                         std.log.info("checksum mismatch {ks} {ks}", .{ b3sum, local.path });
@@ -157,7 +163,8 @@ pub const Package = struct {
     }
 
     pub fn download(self: *const Package, generate_checksum: bool) !bool {
-        _ = generate_checksum;
+        const checksums = if (generate_checksum) try self.dir.createFile("checksums", .{}) else null;
+        defer if (checksums) |f| f.close();
 
         for (self.sources.items) |source| {
             switch (source) {
@@ -200,6 +207,10 @@ pub const Package = struct {
                     };
                     defer file.close();
                     std.log.info("found remote file {ks}", .{file_name});
+
+                    var b3sum: checksum.CHECKSUM = undefined;
+                    try checksum.b3sum(file, &b3sum);
+                    if (checksums) |f| try f.writer().print("{s}\n", .{b3sum});
                 },
                 .Local => |local| {
                     const file = self.dir.openFile(local.path, .{}) catch |err| {
@@ -211,8 +222,7 @@ pub const Package = struct {
 
                     var b3sum: checksum.CHECKSUM = undefined;
                     try checksum.b3sum(file, &b3sum);
-
-                    std.log.info("cksum {ks}", .{b3sum});
+                    if (checksums) |f| try f.writer().print("{s}\n", .{b3sum});
                 },
             }
         }
@@ -268,11 +278,11 @@ fn parse_sources(allocator: std.mem.Allocator, sources: []const u8, checksums: [
 
         if (std.mem.containsAtLeast(u8, source, 1, "://")) {
             try sourceArray.append(.{
-                .Http = .{ .build_path = build_path, .fetch_url = source, .checksum = checksumIter.next() orelse unreachable },
+                .Http = .{ .build_path = build_path, .fetch_url = source, .checksum = checksumIter.next() },
             });
         } else {
             try sourceArray.append(.{
-                .Local = .{ .build_path = build_path, .path = source, .checksum = checksumIter.next() orelse unreachable },
+                .Local = .{ .build_path = build_path, .path = source, .checksum = checksumIter.next() },
             });
         }
     }
