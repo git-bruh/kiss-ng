@@ -1,4 +1,8 @@
 const std = @import("std");
+const config = @import("./config.zig");
+const checksum = @import("utils/checksum.zig");
+const curl_download = @import("utils/download.zig");
+const git_util = @import("utils/git.zig");
 
 /// A dependency can either be build time (needed just for building the package)
 /// or runtime (needed both at build time and runtime)
@@ -57,7 +61,7 @@ pub const Package = struct {
     name: []const u8,
     version: []const u8,
     // backing allocated content for sources and dependencies
-    backing_contents: [3]?[]const u8,
+    backing_contents: [4]?[]const u8,
     dependencies: std.ArrayList(Dependency),
     sources: std.ArrayList(Source),
     dir: std.fs.Dir,
@@ -86,16 +90,16 @@ pub const Package = struct {
         const checksums = try read_until_end(allocator, dir, "checksums");
         errdefer if (checksums != null) allocator.free(checksums.?);
 
-        const sourcesArray = try parse_sources(allocator, sources orelse "", checksums orelse "");
+        const sourcesArray = try parse_sources(allocator, sliceTillWhitespace(sources orelse ""), sliceTillWhitespace(checksums orelse ""));
         errdefer sourcesArray.deinit();
 
-        const dependencies = try parse_dependencies(allocator, depends orelse "");
+        const dependencies = try parse_dependencies(allocator, sliceTillWhitespace(depends orelse ""));
         errdefer dependencies.deinit();
 
         return Package{
             .name = try allocator.dupe(u8, name),
-            .version = version,
-            .backing_contents = .{ depends, sources, checksums },
+            .version = sliceTillWhitespace(version),
+            .backing_contents = .{ depends, sources, checksums, version },
             .dependencies = dependencies,
             .sources = sourcesArray,
             .dir = .{ .fd = dir.fd },
@@ -103,9 +107,121 @@ pub const Package = struct {
         };
     }
 
+    pub fn checksum_verify(self: *const Package) !bool {
+        for (self.sources.items) |source| {
+            switch (source) {
+                .Git => |git| {
+                    std.log.info("skipping checksum for git source {ks}", .{git.clone_url});
+                    continue;
+                },
+                .Http => |http| {
+                    const file_name = sliceNameFromUrl(http.fetch_url);
+                    const dir = try config.Config.get_cache_dir(self.name, http.build_path);
+                    const file = dir.openFile(file_name, .{}) catch |err| {
+                        std.log.err("failed to open remote file {ks} for verification {}", .{ file_name, err });
+                        return false;
+                    };
+                    defer file.close();
+
+                    var b3sum: checksum.CHECKSUM = undefined;
+                    try checksum.b3sum(file, &b3sum);
+
+                    if (std.mem.eql(u8, &b3sum, http.checksum)) {
+                        std.log.info("checksum matched {ks} {ks}", .{ b3sum, file_name });
+                    } else {
+                        std.log.info("checksum mismatch {ks} {ks}", .{ b3sum, file_name });
+                        return false;
+                    }
+                },
+                .Local => |local| {
+                    const file = self.dir.openFile(local.path, .{}) catch |err| {
+                        std.log.err("failed to open local file {ks} for verification: {}", .{ local.path, err });
+                        return false;
+                    };
+                    defer file.close();
+
+                    var b3sum: checksum.CHECKSUM = undefined;
+                    try checksum.b3sum(file, &b3sum);
+
+                    if (std.mem.eql(u8, &b3sum, local.checksum)) {
+                        std.log.info("checksum matched {ks} {ks}", .{ b3sum, local.path });
+                    } else {
+                        std.log.info("checksum mismatch {ks} {ks}", .{ b3sum, local.path });
+                        return false;
+                    }
+                },
+            }
+        }
+
+        return true;
+    }
+
+    pub fn download(self: *const Package, generate_checksum: bool) !bool {
+        _ = generate_checksum;
+
+        for (self.sources.items) |source| {
+            switch (source) {
+                .Git => |git| {
+                    var cache_dir = try config.Config.get_cache_dir(self.name, git.build_path);
+                    defer cache_dir.close();
+
+                    const dir_name = sliceNameFromUrl(git.clone_url);
+                    cache_dir.makeDir(dir_name) catch |err| {
+                        if (err != error.PathAlreadyExists) return err;
+                    };
+                    var git_dir = try cache_dir.openDir(dir_name, .{});
+                    defer git_dir.close();
+
+                    std.log.info("fetching git repo {ks}{ks}{ks}", .{ git.clone_url, "@", git.commit_hash orelse "HEAD" });
+                    if (!try git_util.initAndPull(self.allocator, git_dir, git.clone_url, git.commit_hash)) {
+                        return false;
+                    }
+                },
+                .Http => |http| {
+                    var cache_dir = try config.Config.get_cache_dir(self.name, http.build_path);
+                    defer cache_dir.close();
+
+                    const file_name = sliceNameFromUrl(http.fetch_url);
+                    var file = cache_dir.openFile(file_name, .{}) catch |err| blk: {
+                        if (err != error.FileNotFound) return err;
+
+                        var tmp_file_buf: [std.fs.max_path_bytes]u8 = undefined;
+                        const tmp_file_name = try std.fmt.bufPrint(&tmp_file_buf, ".{s}", .{file_name});
+                        const tmp_file = try cache_dir.createFile(tmp_file_name, .{});
+                        defer tmp_file.close();
+
+                        std.log.info("fetching remote file {ks}", .{http.fetch_url});
+                        if (!try curl_download.download(self.allocator, tmp_file, http.fetch_url)) {
+                            return false;
+                        }
+
+                        try cache_dir.rename(tmp_file_name, file_name);
+                        break :blk try cache_dir.openFile(file_name, .{});
+                    };
+                    defer file.close();
+                    std.log.info("found remote file {ks}", .{file_name});
+                },
+                .Local => |local| {
+                    const file = self.dir.openFile(local.path, .{}) catch |err| {
+                        std.log.err("failed to open local file {ks} for checksum generation: {}", .{ local.path, err });
+                        return false;
+                    };
+                    defer file.close();
+                    std.log.info("found local file {ks}", .{local.path});
+
+                    var b3sum: checksum.CHECKSUM = undefined;
+                    try checksum.b3sum(file, &b3sum);
+
+                    std.log.info("cksum {ks}", .{b3sum});
+                },
+            }
+        }
+
+        return true;
+    }
+
     pub fn free(self: *Package) void {
         self.allocator.free(self.name);
-        self.allocator.free(self.version);
         for (self.backing_contents) |bytes| {
             if (bytes != null) self.allocator.free(bytes.?);
         }
@@ -129,8 +245,13 @@ fn parse_sources(allocator: std.mem.Allocator, sources: []const u8, checksums: [
         const build_path = iter.next();
 
         // Ignore empty lines and comments
-        if (std.mem.startsWith(u8, source, "") or std.mem.startsWith(u8, source, "#")) {
+        if (source.len == 0) {
             continue;
+        }
+
+        switch (source[0]) {
+            ' ', '#', '\t'...'\r' => continue,
+            else => {},
         }
 
         if (std.mem.startsWith(u8, source, "git+")) {
@@ -140,20 +261,18 @@ fn parse_sources(allocator: std.mem.Allocator, sources: []const u8, checksums: [
             const commitHash = cloneCommitIter.next();
 
             try sourceArray.append(.{
-                .Git = .{ .build_path = build_path, .clone_url = cloneUrl, .commit_hash = commitHash },
+                .Git = .{ .build_path = build_path, .clone_url = cloneUrl["git+".len..cloneUrl.len], .commit_hash = commitHash },
             });
             continue;
         }
 
-        const checksum = checksumIter.next() orelse unreachable;
-
         if (std.mem.containsAtLeast(u8, source, 1, "://")) {
             try sourceArray.append(.{
-                .Http = .{ .build_path = build_path, .fetch_url = source, .checksum = checksum },
+                .Http = .{ .build_path = build_path, .fetch_url = source, .checksum = checksumIter.next() orelse unreachable },
             });
         } else {
             try sourceArray.append(.{
-                .Local = .{ .build_path = build_path, .path = source, .checksum = checksum },
+                .Local = .{ .build_path = build_path, .path = source, .checksum = checksumIter.next() orelse unreachable },
             });
         }
     }
@@ -186,4 +305,19 @@ fn read_until_end(allocator: std.mem.Allocator, dir: *std.fs.Dir, name: []const 
     defer file.close();
 
     return try file.readToEndAlloc(allocator, 1 << 16);
+}
+
+fn sliceTillWhitespace(contents: []const u8) []const u8 {
+    // strip trailig whitespace
+    var len = contents.len;
+    while (len > 0) : (len -= 1) {
+        if (!std.ascii.isWhitespace(contents[len - 1])) {
+            return contents[0..len];
+        }
+    }
+    return contents;
+}
+
+fn sliceNameFromUrl(url: []const u8) []const u8 {
+    return url[(std.mem.lastIndexOfScalar(u8, url, '/') orelse unreachable) + 1 .. url.len];
 }

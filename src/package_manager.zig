@@ -3,14 +3,19 @@ const config = @import("config.zig");
 const types = @import("package.zig");
 const commands = @import("commands.zig");
 const dag = @import("dag_zig");
+const git = @import("utils/git.zig");
+
+const PackageFindError = error{
+    PackageNotFound,
+};
 
 pub const PackageManager = struct {
     allocator: std.mem.Allocator,
     kiss_config: config.Config,
 
-    const PackageFindError = error{
-        PackageNotFound,
-    };
+    pub fn new(allocator: std.mem.Allocator, kiss_config: config.Config) PackageManager {
+        return .{ .allocator = allocator, .kiss_config = kiss_config };
+    }
 
     fn find_in_path(self: *PackageManager, pkg_name: []const u8) !std.fs.Dir {
         var it = std.mem.splitScalar(u8, self.kiss_config.path, ':');
@@ -80,6 +85,63 @@ pub const PackageManager = struct {
         }
     }
 
+    fn update(self: *PackageManager) !void {
+        var visited_map = std.BufMap.init(self.allocator);
+        defer visited_map.deinit();
+
+        std.log.info("Updating repositories", .{});
+
+        var it = std.mem.splitScalar(u8, self.kiss_config.path, ':');
+
+        while (it.next()) |path| {
+            if (std.mem.eql(u8, path, "")) continue;
+
+            const git_dir = try std.fs.openDirAbsolute(path, .{});
+            var root = try git.repoRoot(self.allocator, git_dir) orelse {
+                std.log.info("not a git repo {ks}", .{path});
+                continue;
+            };
+            defer root.deinit(self.allocator);
+
+            // trailing newline
+            _ = root.orderedRemove(root.items.len - 1);
+
+            if (visited_map.get(root.items) != null) continue;
+            try visited_map.put(root.items, "");
+
+            std.log.info("updating repo at {ks}", .{root.items});
+            if (!try git.pull(self.allocator, git_dir)) {
+                std.log.err("failed to update repo {ks}", .{root.items});
+                continue;
+            }
+        }
+
+        std.log.info("Run {ks} to upgrade packages", .{"kiss U"});
+    }
+
+    fn upgrade(self: *PackageManager) !void {
+        try std.posix.chdir(self.kiss_config.root orelse "/");
+        try std.posix.chdir(config.DB_PATH_INSTALLED);
+
+        var dir = try std.fs.cwd().openDir(".", .{ .iterate = true });
+        defer dir.close();
+
+        var it = dir.iterate();
+        while (try it.next()) |entry| {
+            var pkg_dir = try std.fs.cwd().openDir(entry.name, .{});
+            var package = try types.Package.new(self.allocator, &pkg_dir);
+            defer package.free();
+
+            var repo_pkg_dir = try self.find_in_path(entry.name);
+            var repo_pkg = try types.Package.new(self.allocator, &repo_pkg_dir);
+            defer repo_pkg.free();
+
+            if (!std.mem.eql(u8, package.version, repo_pkg.version)) {
+                try std.io.getStdOut().writer().print("{s} {s} => {s}\n", .{ package.name, package.version, repo_pkg.version });
+            }
+        }
+    }
+
     pub fn handle(self: *PackageManager, command: commands.Command) !void {
         switch (command) {
             .Alternatives => |alt| {
@@ -89,10 +151,22 @@ pub const PackageManager = struct {
                 _ = build_args;
             },
             .Checksum => |checksum| {
-                _ = checksum;
+                for (checksum.?) |package| {
+                    var dir = try self.find_in_path(package);
+                    var pkg = try types.Package.new(self.allocator, &dir);
+                    defer pkg.free();
+
+                    _ = try pkg.checksum_verify();
+                }
             },
             .Download => |download| {
-                _ = download;
+                for (download.?) |package| {
+                    var dir = try self.find_in_path(package);
+                    var pkg = try types.Package.new(self.allocator, &dir);
+                    defer pkg.free();
+
+                    _ = try pkg.download(false);
+                }
             },
             .Install => |install| {
                 _ = install;
@@ -111,7 +185,7 @@ pub const PackageManager = struct {
                         var package = try types.Package.new(self.allocator, &pkg_dir);
                         defer package.free();
 
-                        try std.io.getStdOut().writer().print("{s} {s}", .{ package.name, package.version });
+                        try std.io.getStdOut().writer().print("{s} {s}\n", .{ package.name, package.version });
                     }
                 } else {
                     for (list.?) |pkg_name| {
@@ -152,78 +226,9 @@ pub const PackageManager = struct {
                 }
             },
             .Update => try self.update(),
-            .Upgrade => {},
-            .Version => {
-                std.log.info("{s}", .{"0.0.1"});
-            },
+            .Upgrade => try self.upgrade(),
+            .Version => try std.io.getStdOut().writer().print("{s}\n", .{"0.0.1"}),
         }
-    }
-
-    fn update(self: *PackageManager) !void {
-        var visited_map = std.BufMap.init(self.allocator);
-        defer visited_map.deinit();
-
-        std.log.info("Updating repositories", .{});
-
-        var it = std.mem.splitScalar(u8, self.kiss_config.path, ':');
-
-        while (it.next()) |path| {
-            if (std.mem.eql(u8, path, "")) continue;
-
-            std.posix.chdir(path) catch |err| {
-                std.log.err("failed to enter path {ks}: {}", .{ path, err });
-                continue;
-            };
-
-            const revParseArgs: []const []const u8 = &.{ "git", "rev-parse", "--show-toplevel" };
-            var revParseC = std.process.Child.init(revParseArgs, self.allocator);
-
-            revParseC.stdout_behavior = .Pipe;
-            revParseC.stderr_behavior = .Pipe;
-
-            try revParseC.spawn();
-
-            const buf_size = 1024;
-
-            var repo_path = try std.ArrayListUnmanaged(u8).initCapacity(self.allocator, buf_size);
-            defer repo_path.deinit(self.allocator);
-
-            var stderr = try std.ArrayListUnmanaged(u8).initCapacity(self.allocator, buf_size);
-            defer stderr.deinit(self.allocator);
-
-            try revParseC.collectOutput(self.allocator, &repo_path, &stderr, buf_size);
-
-            var term = try revParseC.wait();
-            if (term == .Exited) {
-                if (term.Exited != 0) {
-                    std.log.info("not a git repo {ks}", .{path});
-                    continue;
-                }
-            } else {
-                @panic("process didn't terminate as expected");
-            }
-
-            _ = repo_path.orderedRemove(repo_path.items.len - 1);
-
-            if (visited_map.get(repo_path.items) != null) continue;
-            try visited_map.put(repo_path.items, "");
-
-            std.log.info("updating repo at {ks}", .{repo_path.items});
-
-            const pullArgs: []const []const u8 = &.{ "git", "pull" };
-            var pullC = std.process.Child.init(pullArgs, self.allocator);
-            term = try pullC.spawnAndWait();
-            if (term == .Exited and term.Exited != 0) {
-                std.log.err("failed to update repo {ks}: code {d}", .{ repo_path.items, term.Exited });
-                continue;
-            }
-        }
-
-        std.log.info("Run {ks} to upgrade packages", .{"kiss U"});
-    }
-
-    pub fn new(allocator: std.mem.Allocator, kiss_config: config.Config) PackageManager {
-        return .{ .allocator = allocator, .kiss_config = kiss_config };
     }
 
     pub fn free(self: *PackageManager) void {

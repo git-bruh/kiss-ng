@@ -3,6 +3,8 @@ const std = @import("std");
 pub const DB_PATH = "var/db/kiss";
 pub const DB_PATH_INSTALLED = DB_PATH ++ "/installed";
 
+pub const CACHE_PATH = "/var/cache/kiss";
+
 pub const Config = struct {
     allocator: std.mem.Allocator,
 
@@ -15,9 +17,6 @@ pub const Config = struct {
     /// KISS_TMPDIR
     /// base directory for temporary build trees
     tmpdir: ?[]const u8,
-
-    /// cache directory for logs, sources, binaries
-    cache: []const u8,
 
     /// KISS_DEBUG
     /// whether to preserve build directory for debugging
@@ -46,9 +45,6 @@ pub const Config = struct {
         };
         errdefer if (tmpdir != null) allocator.free(tmpdir.?);
 
-        const cache = try get_cache_directory(allocator);
-        errdefer allocator.free(cache);
-
         const debug = std.posix.getenv("KISS_DEBUG");
         const strip = std.posix.getenv("KISS_STRIP");
 
@@ -57,7 +53,6 @@ pub const Config = struct {
             .path = path,
             .root = root,
             .tmpdir = tmpdir,
-            .cache = cache,
             // defaults to false
             .debug = (debug != null and debug.?[0] == '1'),
             // defaults to true
@@ -65,17 +60,35 @@ pub const Config = struct {
         };
     }
 
+    pub fn get_cache_dir(pkg_name: []const u8, build_path: ?[]const u8) !std.fs.Dir {
+        var cache_dir = try std.fs.openDirAbsolute(CACHE_PATH, .{});
+        defer cache_dir.close();
+
+        cache_dir.makeDir(pkg_name) catch |err| {
+            if (err != error.PathAlreadyExists) return err;
+        };
+
+        const pkg_dir = try cache_dir.openDir(pkg_name, .{});
+        if (build_path == null) return pkg_dir;
+
+        var prev_dir = pkg_dir;
+
+        var it = std.mem.splitScalar(u8, build_path.?, '/');
+        while (it.next()) |path| {
+            errdefer prev_dir.close();
+            prev_dir.makeDir(path) catch |err| {
+                if (err != error.PathAlreadyExists) return err;
+            };
+            const new_dir = try prev_dir.openDir(path, .{});
+            prev_dir.close();
+            prev_dir = new_dir;
+        }
+
+        return prev_dir;
+    }
+
     pub fn free(self: *Config) void {
         self.allocator.free(self.path);
         if (self.root != null) self.allocator.free(self.root.?);
-        self.allocator.free(self.cache);
     }
 };
-
-fn get_cache_directory(allocator: std.mem.Allocator) ![]u8 {
-    const xdg_cache_home = std.posix.getenv("XDG_CACHE_HOME");
-    if (xdg_cache_home != null) return std.fmt.allocPrint(allocator, "{s}/kiss", .{xdg_cache_home.?});
-
-    const home = std.posix.getenv("HOME") orelse return error.EnvironmentVariableNotFound;
-    return std.fmt.allocPrint(allocator, "{s}/.cache/kiss", .{home});
-}

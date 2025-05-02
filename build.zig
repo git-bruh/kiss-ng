@@ -32,6 +32,9 @@ pub fn build(b: *std.Build) void {
         .name = "kiss_ng",
         .root_module = exe_mod,
     });
+    exe.linkSystemLibrary("c");
+    exe.linkSystemLibrary("blake3");
+    exe.linkSystemLibrary("curl");
 
     const dag_zig = b.dependency("dag_zig", .{
         .target = target,
