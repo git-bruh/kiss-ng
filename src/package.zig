@@ -120,6 +120,8 @@ pub const Package = struct {
     }
 
     pub fn checksum_verify(self: *const Package) !bool {
+        std.log.info("verifying checksums for {ks}", .{self.name});
+
         for (self.sources.items) |source| {
             switch (source) {
                 .Git => |git| {
@@ -128,7 +130,7 @@ pub const Package = struct {
                 },
                 .Http => |http| {
                     const file_name = sliceNameFromUrl(http.fetch_url);
-                    const dir = try config.Config.get_cache_dir(self.name, http.build_path);
+                    const dir = try config.Config.get_source_dir(self.name, http.build_path);
                     const file = dir.openFile(file_name, .{}) catch |err| {
                         std.log.err("failed to open remote file {ks} for verification {}", .{ file_name, err });
                         return false;
@@ -181,7 +183,7 @@ pub const Package = struct {
         for (self.sources.items) |source| {
             switch (source) {
                 .Git => |git| {
-                    var cache_dir = try config.Config.get_cache_dir(self.name, git.build_path);
+                    var cache_dir = try config.Config.get_source_dir(self.name, git.build_path);
                     defer cache_dir.close();
 
                     const dir_name = sliceNameFromUrl(git.clone_url);
@@ -197,7 +199,7 @@ pub const Package = struct {
                     }
                 },
                 .Http => |http| {
-                    var cache_dir = try config.Config.get_cache_dir(self.name, http.build_path);
+                    var cache_dir = try config.Config.get_source_dir(self.name, http.build_path);
                     defer cache_dir.close();
 
                     const file_name = sliceNameFromUrl(http.fetch_url);
@@ -240,6 +242,14 @@ pub const Package = struct {
         }
 
         return true;
+    }
+
+    pub fn build(self: *const Package) !void {
+        _ = self;
+    }
+
+    pub fn install(self: *const Package) !void {
+        _ = self;
     }
 
     pub fn free(self: *Package) void {

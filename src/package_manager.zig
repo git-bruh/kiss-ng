@@ -91,7 +91,7 @@ pub const PackageManager = struct {
         return package.name;
     }
 
-    fn build(self: *PackageManager, pkg_name: ?[][]const u8) !void {
+    fn build(self: *PackageManager, pkg_name: ?[][]const u8) !bool {
         var pkg_map = std.StringHashMap(types.Package).init(self.allocator);
         defer clear_pkg_map(&pkg_map);
 
@@ -120,14 +120,26 @@ pub const PackageManager = struct {
 
         try pkg_dag.tsort(ROOT_PKG, &sorted);
 
-        if (sorted.items.len == 0) return;
+        if (sorted.items.len == 0) return true;
+
+        var it = pkg_map.valueIterator();
+        while (it.next()) |pkg| if (!try pkg.checksum_verify()) return false;
 
         for (sorted.items[0 .. sorted.items.len - 1], 0..) |item, idx| {
-            std.log.debug("Build Order: {d}, Package: {s}, Implicit: {}", .{ idx, item, (pkg_map.get(item) orelse unreachable).implicit });
+            const pkg = pkg_map.get(item) orelse unreachable;
+            std.log.info("({d}/{d}) building package {ks}", .{ idx + 1, sorted.items.len - 1, pkg.name });
+
+            try pkg.build();
+            if (pkg.implicit) {
+                std.log.info("{ks} needed as dependency, installing", .{pkg.name});
+                try pkg.install();
+            }
         }
+
+        return true;
     }
 
-    fn upgrade(self: *PackageManager) !void {
+    fn upgrade(self: *PackageManager) !bool {
         var installed_dir = try self.kiss_config.get_installed_dir();
         defer installed_dir.close();
 
@@ -157,11 +169,11 @@ pub const PackageManager = struct {
 
             if (!std.mem.eql(u8, package.version, repo_pkg.version)) {
                 try candidates.append(package.name);
-                std.log.info("{s} {s} => {s}", .{ package.name, package.version, repo_pkg.version });
+                std.log.info("{ks} {s} => {s}", .{ package.name, package.version, repo_pkg.version });
             }
         }
 
-        if (candidates.items.len == 0) return;
+        if (candidates.items.len == 0) return true;
 
         try std.io.getStdOut().writer().print("Continue? Press Enter to continue or Ctrl+C to abort", .{});
         var buffer: [1]u8 = undefined;
@@ -179,11 +191,20 @@ pub const PackageManager = struct {
 
         try pkg_dag.tsort(ROOT_PKG, &sorted);
 
-        if (sorted.items.len == 0) return;
+        if (sorted.items.len == 0) return true;
+
+        // must verify from the sorted array here because pkg_map contains all packages
+        for (sorted.items[0 .. sorted.items.len - 1]) |pkg_name| if (!try (pkg_map.get(pkg_name) orelse unreachable).checksum_verify()) return false;
 
         for (sorted.items[0 .. sorted.items.len - 1], 0..) |item, idx| {
-            std.log.debug("Build Order: {d}, Package: {s}", .{ idx, item });
+            const pkg = pkg_map.get(item) orelse unreachable;
+            std.log.info("({d}/{d}) building package {ks}", .{ idx + 1, sorted.items.len - 1, pkg.name });
+
+            try pkg.build();
+            try pkg.install();
         }
+
+        return true;
     }
 
     fn update(self: *PackageManager) !void {
@@ -225,7 +246,7 @@ pub const PackageManager = struct {
             .Alternatives => |alt| {
                 _ = alt;
             },
-            .Build => |build_args| try self.build(build_args),
+            .Build => |build_args| return try self.build(build_args),
             .Checksum => |checksum| {
                 if (checksum == null) {
                     var pkg = try types.Package.new_from_cwd(self.allocator);
@@ -316,7 +337,7 @@ pub const PackageManager = struct {
                 }
             },
             .Update => try self.update(),
-            .Upgrade => try self.upgrade(),
+            .Upgrade => return try self.upgrade(),
             .Version => try std.io.getStdOut().writer().print("{s}\n", .{"0.0.1"}),
         }
 

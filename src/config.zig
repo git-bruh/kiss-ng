@@ -60,13 +60,12 @@ pub const Config = struct {
         };
     }
 
-    pub fn get_cache_dir(pkg_name: []const u8, build_path: ?[]const u8) !std.fs.Dir {
-        var cache_dir = try std.fs.openDirAbsolute(CACHE_PATH, .{});
+    pub fn get_source_dir(pkg_name: []const u8, build_path: ?[]const u8) !std.fs.Dir {
+        try ensureDir(std.fs.makeDirAbsolute(CACHE_PATH ++ "/sources"));
+        var cache_dir = try std.fs.openDirAbsolute(CACHE_PATH ++ "/sources", .{});
         defer cache_dir.close();
 
-        cache_dir.makeDir(pkg_name) catch |err| {
-            if (err != error.PathAlreadyExists) return err;
-        };
+        try ensureDir(cache_dir.makeDir(pkg_name));
 
         const pkg_dir = try cache_dir.openDir(pkg_name, .{});
         if (build_path == null) return pkg_dir;
@@ -76,15 +75,37 @@ pub const Config = struct {
         var it = std.mem.splitScalar(u8, build_path.?, '/');
         while (it.next()) |path| {
             errdefer prev_dir.close();
-            prev_dir.makeDir(path) catch |err| {
-                if (err != error.PathAlreadyExists) return err;
-            };
+            try ensureDir(prev_dir.makeDir(path));
             const new_dir = try prev_dir.openDir(path, .{});
             prev_dir.close();
             prev_dir = new_dir;
         }
 
         return prev_dir;
+    }
+
+    pub fn get_bin_dir() !std.fs.Dir {
+        try ensureDir(std.fs.makeDirAbsolute(CACHE_PATH ++ "/bin"));
+        return try std.fs.openDirAbsolute(CACHE_PATH ++ "/bin", .{});
+    }
+
+    pub fn get_logs_dir() !std.fs.Dir {
+        const epoch = std.time.epoch.EpochSeconds{
+            .secs = @intCast(std.time.timestamp()),
+        };
+        const epoch_day = epoch.getEpochDay();
+        const year_day = epoch_day.calculateYearDay();
+        const month_day = year_day.calculateMonthDay();
+
+        const buf: ["YYYY-MM-DD".len]u8 = undefined;
+        try std.fmt.bufPrint(&buf, "{d}-{d:02}-{d:02}", .{ year_day.year, month_day.month.numeric(), month_day.day_index });
+
+        try ensureDir(std.fs.makeDirAbsolute(CACHE_PATH ++ "/logs"));
+        const cache_dir = try std.fs.openDirAbsolute(CACHE_PATH ++ "/logs", .{});
+        defer cache_dir.close();
+
+        try ensureDir(cache_dir.makeDir(buf));
+        return try cache_dir.openDir(buf, .{});
     }
 
     pub fn get_installed_dir(self: *const Config) !std.fs.Dir {
@@ -99,3 +120,8 @@ pub const Config = struct {
         if (self.root != null) self.allocator.free(self.root.?);
     }
 };
+
+fn ensureDir(err: anytype) !void {
+    if (err == error.PathAlreadyExists) return;
+    return err;
+}
