@@ -14,6 +14,8 @@ const BuildFilter = enum {
     SkipInstalledIfSameVersion,
 };
 
+const ROOT_PKG = "_kiss_ng_root";
+
 pub const PackageManager = struct {
     allocator: std.mem.Allocator,
     kiss_config: config.Config,
@@ -27,14 +29,9 @@ pub const PackageManager = struct {
         while (it.next()) |path| {
             if (std.mem.eql(u8, path, "")) continue;
 
-            std.log.debug("finding package {ks} in path {ks}", .{ pkg_name, path });
-
             var repo_dir = try std.fs.openDirAbsolute(path, .{});
             defer repo_dir.close();
-            var dir = repo_dir.openDir(pkg_name, .{}) catch |err| {
-                std.log.debug("failed to find package {ks} at path {ks}: {}", .{ pkg_name, path, err });
-                continue;
-            };
+            var dir = repo_dir.openDir(pkg_name, .{}) catch continue;
             return try types.Package.new(self.allocator, &dir);
         }
 
@@ -50,17 +47,20 @@ pub const PackageManager = struct {
         filter: BuildFilter,
         pkg_name: ?[]const u8,
     ) ![]const u8 {
-        var package = if (pkg_name != null) try self.find_in_path(pkg_name.?) else try types.Package.new_from_cwd(self.allocator);
+        const package = if (pkg_name != null) pkg_map.get(pkg_name.?) orelse blk: {
+            var pkg = try self.find_in_path(pkg_name.?);
+            pkg_map.putNoClobber(pkg.name, pkg) catch |err| {
+                pkg.free();
+                return err;
+            };
+            break :blk pkg;
+        } else try types.Package.new_from_cwd(self.allocator);
 
-        pkg_map.putNoClobber(package.name, package) catch |err| {
-            package.free();
-            return err;
-        };
         try pkg_dag.add_child(package.name, null);
 
         outer: for (package.dependencies.items) |dependency| {
             const dep_pkg = pkg_map.get(dependency.name) orelse blk: {
-                std.log.debug("looking up dependency {s} of {s}", .{ dependency.name, package.name });
+                std.log.debug("looking up dependency {ks} of {ks}", .{ dependency.name, package.name });
                 _ = try self.construct_dependency_tree(pkg_map, installed_pkg_map, pkg_dag, filter, dependency.name);
                 break :blk pkg_map.get(dependency.name) orelse unreachable;
             };
@@ -90,33 +90,23 @@ pub const PackageManager = struct {
 
     fn build(self: *PackageManager, pkg_name: ?[][]const u8) !bool {
         var pkg_map = std.StringHashMap(types.Package).init(self.allocator);
-        defer {
-            var it = pkg_map.iterator();
-            while (it.next()) |entry| entry.value_ptr.free();
-            pkg_map.deinit();
-        }
+        defer clear_pkg_map(&pkg_map);
 
         var installed_pkg_map = std.StringHashMap(types.Package).init(self.allocator);
-        defer {
-            var it = installed_pkg_map.iterator();
-            while (it.next()) |entry| entry.value_ptr.free();
-            installed_pkg_map.deinit();
-        }
+        defer clear_pkg_map(&installed_pkg_map);
 
         var pkg_dag = dag.DAG([]const u8).init(self.allocator);
         defer pkg_dag.deinit();
 
-        const root_pkg = "_kiss_ng_root";
-
         if (pkg_name == null) {
             try pkg_dag.add_child(
-                root_pkg,
+                ROOT_PKG,
                 try self.construct_dependency_tree(&pkg_map, &installed_pkg_map, &pkg_dag, .SkipInstalled, null),
             );
         } else {
             for (pkg_name.?) |pkg| {
                 try pkg_dag.add_child(
-                    root_pkg,
+                    ROOT_PKG,
                     try self.construct_dependency_tree(&pkg_map, &installed_pkg_map, &pkg_dag, .SkipInstalled, pkg),
                 );
             }
@@ -125,7 +115,7 @@ pub const PackageManager = struct {
         var sorted = std.ArrayList([]const u8).init(self.allocator);
         defer sorted.deinit();
 
-        try pkg_dag.tsort(root_pkg, &sorted);
+        try pkg_dag.tsort(ROOT_PKG, &sorted);
 
         for (sorted.items, 0..) |item, idx| {
             std.log.debug("Build Order: {d}, Package: {s}", .{ idx, item });
@@ -172,18 +162,54 @@ pub const PackageManager = struct {
         var installed_dir = try self.kiss_config.get_installed_dir();
         defer installed_dir.close();
 
+        var pkg_map = std.StringHashMap(types.Package).init(self.allocator);
+        defer clear_pkg_map(&pkg_map);
+
+        var installed_pkg_map = std.StringHashMap(types.Package).init(self.allocator);
+        defer clear_pkg_map(&installed_pkg_map);
+
+        var candidates = std.ArrayList([]const u8).init(self.allocator);
+        defer candidates.deinit();
+
         var it = installed_dir.iterate();
         while (try it.next()) |entry| {
             var pkg_dir = try installed_dir.openDir(entry.name, .{});
             var package = try types.Package.new(self.allocator, &pkg_dir);
-            defer package.free();
+            installed_pkg_map.putNoClobber(package.name, package) catch |err| {
+                package.free();
+                return err;
+            };
 
             var repo_pkg = try self.find_in_path(entry.name);
-            defer repo_pkg.free();
+            pkg_map.putNoClobber(repo_pkg.name, repo_pkg) catch |err| {
+                repo_pkg.free();
+                return err;
+            };
 
             if (!std.mem.eql(u8, package.version, repo_pkg.version)) {
-                try std.io.getStdOut().writer().print("{s} {s} => {s}\n", .{ package.name, package.version, repo_pkg.version });
+                try candidates.append(package.name);
+                std.log.info("{s} {s} => {s}", .{ package.name, package.version, repo_pkg.version });
             }
+        }
+
+        try std.io.getStdOut().writer().print("Continue? Press Enter to continue or Ctrl+C to abort", .{});
+        var buffer: [1]u8 = undefined;
+        _ = try std.io.getStdIn().readAll(&buffer);
+
+        var pkg_dag = dag.DAG([]const u8).init(self.allocator);
+        defer pkg_dag.deinit();
+
+        for (candidates.items) |pkg| {
+            try pkg_dag.add_child(ROOT_PKG, try self.construct_dependency_tree(&pkg_map, &installed_pkg_map, &pkg_dag, .SkipInstalledIfSameVersion, pkg));
+        }
+
+        var sorted = std.ArrayList([]const u8).init(self.allocator);
+        defer sorted.deinit();
+
+        try pkg_dag.tsort(ROOT_PKG, &sorted);
+
+        for (sorted.items, 0..) |item, idx| {
+            std.log.debug("Build Order: {d}, Package: {s}", .{ idx, item });
         }
     }
 
@@ -294,3 +320,9 @@ pub const PackageManager = struct {
         self.kiss_config.free();
     }
 };
+
+fn clear_pkg_map(map: *std.StringHashMap(types.Package)) void {
+    var it = map.iterator();
+    while (it.next()) |entry| entry.value_ptr.free();
+    map.deinit();
+}
