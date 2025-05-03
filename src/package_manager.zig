@@ -59,11 +59,14 @@ pub const PackageManager = struct {
         try pkg_dag.add_child(package.name, null);
 
         outer: for (package.dependencies.items) |dependency| {
-            const dep_pkg = pkg_map.get(dependency.name) orelse blk: {
+            var dep_pkg = pkg_map.getPtr(dependency.name) orelse blk: {
                 std.log.debug("looking up dependency {ks} of {ks}", .{ dependency.name, package.name });
                 _ = try self.construct_dependency_tree(pkg_map, installed_pkg_map, pkg_dag, filter, dependency.name);
-                break :blk pkg_map.get(dependency.name) orelse unreachable;
+                break :blk pkg_map.getPtr(dependency.name) orelse unreachable;
             };
+            // mark the package as implicit so we can ensure to install the
+            // package before building the package that needs it
+            dep_pkg.mark_implicit();
 
             const installed_dep_pkg = installed_pkg_map.get(dependency.name) orelse blk: {
                 var installed_dir = try self.kiss_config.get_installed_dir();
@@ -88,7 +91,7 @@ pub const PackageManager = struct {
         return package.name;
     }
 
-    fn build(self: *PackageManager, pkg_name: ?[][]const u8) !bool {
+    fn build(self: *PackageManager, pkg_name: ?[][]const u8) !void {
         var pkg_map = std.StringHashMap(types.Package).init(self.allocator);
         defer clear_pkg_map(&pkg_map);
 
@@ -117,45 +120,11 @@ pub const PackageManager = struct {
 
         try pkg_dag.tsort(ROOT_PKG, &sorted);
 
-        for (sorted.items, 0..) |item, idx| {
-            std.log.debug("Build Order: {d}, Package: {s}", .{ idx, item });
+        if (sorted.items.len == 0) return;
+
+        for (sorted.items[0 .. sorted.items.len - 1], 0..) |item, idx| {
+            std.log.debug("Build Order: {d}, Package: {s}, Implicit: {}", .{ idx, item, (pkg_map.get(item) orelse unreachable).implicit });
         }
-
-        return true;
-    }
-
-    fn update(self: *PackageManager) !void {
-        var visited_map = std.BufMap.init(self.allocator);
-        defer visited_map.deinit();
-
-        std.log.info("Updating repositories", .{});
-
-        var it = std.mem.splitScalar(u8, self.kiss_config.path, ':');
-
-        while (it.next()) |path| {
-            if (std.mem.eql(u8, path, "")) continue;
-
-            const git_dir = try std.fs.openDirAbsolute(path, .{});
-            var root = try git.repoRoot(self.allocator, git_dir) orelse {
-                std.log.info("not a git repo {ks}", .{path});
-                continue;
-            };
-            defer root.deinit(self.allocator);
-
-            // trailing newline
-            _ = root.orderedRemove(root.items.len - 1);
-
-            if (visited_map.get(root.items) != null) continue;
-            try visited_map.put(root.items, "");
-
-            std.log.info("updating repo at {ks}", .{root.items});
-            if (!try git.pull(self.allocator, git_dir)) {
-                std.log.err("failed to update repo {ks}", .{root.items});
-                continue;
-            }
-        }
-
-        std.log.info("Run {ks} to upgrade packages", .{"kiss U"});
     }
 
     fn upgrade(self: *PackageManager) !void {
@@ -192,6 +161,8 @@ pub const PackageManager = struct {
             }
         }
 
+        if (candidates.items.len == 0) return;
+
         try std.io.getStdOut().writer().print("Continue? Press Enter to continue or Ctrl+C to abort", .{});
         var buffer: [1]u8 = undefined;
         _ = try std.io.getStdIn().readAll(&buffer);
@@ -208,9 +179,45 @@ pub const PackageManager = struct {
 
         try pkg_dag.tsort(ROOT_PKG, &sorted);
 
-        for (sorted.items, 0..) |item, idx| {
+        if (sorted.items.len == 0) return;
+
+        for (sorted.items[0 .. sorted.items.len - 1], 0..) |item, idx| {
             std.log.debug("Build Order: {d}, Package: {s}", .{ idx, item });
         }
+    }
+
+    fn update(self: *PackageManager) !void {
+        var visited_map = std.BufMap.init(self.allocator);
+        defer visited_map.deinit();
+
+        std.log.info("Updating repositories", .{});
+
+        var it = std.mem.splitScalar(u8, self.kiss_config.path, ':');
+
+        while (it.next()) |path| {
+            if (std.mem.eql(u8, path, "")) continue;
+
+            const git_dir = try std.fs.openDirAbsolute(path, .{});
+            var root = try git.repoRoot(self.allocator, git_dir) orelse {
+                std.log.info("not a git repo {ks}", .{path});
+                continue;
+            };
+            defer root.deinit(self.allocator);
+
+            // trailing newline
+            _ = root.orderedRemove(root.items.len - 1);
+
+            if (visited_map.get(root.items) != null) continue;
+            try visited_map.put(root.items, "");
+
+            std.log.info("updating repo at {ks}", .{root.items});
+            if (!try git.pull(self.allocator, git_dir)) {
+                std.log.err("failed to update repo {ks}", .{root.items});
+                continue;
+            }
+        }
+
+        std.log.info("Run {ks} to upgrade packages", .{"kiss U"});
     }
 
     pub fn handle(self: *PackageManager, command: commands.Command) !bool {
@@ -218,7 +225,7 @@ pub const PackageManager = struct {
             .Alternatives => |alt| {
                 _ = alt;
             },
-            .Build => |build_args| return try self.build(build_args),
+            .Build => |build_args| try self.build(build_args),
             .Checksum => |checksum| {
                 if (checksum == null) {
                     var pkg = try types.Package.new_from_cwd(self.allocator);

@@ -60,6 +60,8 @@ const Source = union(enum) {
 pub const Package = struct {
     name: []const u8,
     version: []const u8,
+    // whether it is needed by another package
+    implicit: bool,
     // backing allocated content for sources and dependencies
     backing_contents: [4]?[]const u8,
     dependencies: std.ArrayList(Dependency),
@@ -99,6 +101,7 @@ pub const Package = struct {
         return Package{
             .name = try allocator.dupe(u8, name),
             .version = sliceTillWhitespace(version),
+            .implicit = false,
             .backing_contents = .{ depends, sources, checksums, version },
             .dependencies = dependencies,
             .sources = sourcesArray,
@@ -110,6 +113,10 @@ pub const Package = struct {
     pub fn new_from_cwd(allocator: std.mem.Allocator) !Package {
         var dir = try std.fs.cwd().openDir(".", .{});
         return try Package.new(allocator, &dir);
+    }
+
+    pub fn mark_implicit(self: *Package) void {
+        self.implicit = true;
     }
 
     pub fn checksum_verify(self: *const Package) !bool {
