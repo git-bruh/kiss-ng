@@ -69,19 +69,7 @@ pub const Config = struct {
 
         const pkg_dir = try cache_dir.openDir(pkg_name, .{});
         if (build_path == null) return pkg_dir;
-
-        var prev_dir = pkg_dir;
-
-        var it = std.mem.splitScalar(u8, build_path.?, '/');
-        while (it.next()) |path| {
-            errdefer prev_dir.close();
-            try ensureDir(prev_dir.makeDir(path));
-            const new_dir = try prev_dir.openDir(path, .{});
-            prev_dir.close();
-            prev_dir = new_dir;
-        }
-
-        return prev_dir;
+        return try mkdirParents(pkg_dir, build_path.?);
     }
 
     pub fn get_bin_dir() !std.fs.Dir {
@@ -108,6 +96,13 @@ pub const Config = struct {
         return try cache_dir.openDir(buf, .{});
     }
 
+    pub fn get_build_dir(self: *const Config, pkg_name: []const u8) !std.fs.Dir {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = try std.fmt.bufPrint(&buf, "{s}/{d}/{s}", .{ self.tmpdir orelse (CACHE_PATH ++ "/proc"), std.os.linux.getpid(), pkg_name });
+
+        return try mkdirParents(null, path);
+    }
+
     pub fn get_installed_dir(self: *const Config) !std.fs.Dir {
         var root_dir = try std.fs.openDirAbsolute(self.root orelse "/", .{});
         defer root_dir.close();
@@ -124,4 +119,17 @@ pub const Config = struct {
 fn ensureDir(err: anytype) !void {
     if (err == error.PathAlreadyExists) return;
     return err;
+}
+
+fn mkdirParents(dir: ?std.fs.Dir, path: []const u8) !std.fs.Dir {
+    var prev_dir = if (dir != null) dir.? else try std.fs.openDirAbsolute("/", .{});
+    var it = std.mem.splitScalar(u8, path, '/');
+    while (it.next()) |sub_path| {
+        errdefer prev_dir.close();
+        try ensureDir(prev_dir.makeDir(sub_path));
+        const new_dir = try prev_dir.openDir(sub_path, .{});
+        prev_dir.close();
+        prev_dir = new_dir;
+    }
+    return prev_dir;
 }

@@ -136,7 +136,7 @@ pub const PackageManager = struct {
             const pkg = pkg_map.get(item) orelse unreachable;
             std.log.info("({d}/{d}) building package {ks}", .{ idx + 1, sorted.items.len - 1, pkg.name });
 
-            try pkg.build();
+            try pkg.build(&self.kiss_config);
             if (pkg.implicit) {
                 std.log.info("{ks} needed as dependency, installing", .{pkg.name});
                 try pkg.install();
@@ -207,7 +207,7 @@ pub const PackageManager = struct {
             const pkg = pkg_map.get(item) orelse unreachable;
             std.log.info("({d}/{d}) building package {ks}", .{ idx + 1, sorted.items.len - 1, pkg.name });
 
-            try pkg.build();
+            try pkg.build(&self.kiss_config);
             try pkg.install();
         }
 

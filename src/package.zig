@@ -211,8 +211,9 @@ pub const Package = struct {
         return true;
     }
 
-    pub fn build(self: *const Package) !void {
-        _ = self;
+    pub fn build(self: *const Package, kiss_config: *const config.Config) !void {
+        var build_dir = try kiss_config.get_build_dir(self.name);
+        defer build_dir.close();
     }
 
     pub fn install(self: *const Package) !void {
