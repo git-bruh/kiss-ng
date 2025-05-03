@@ -54,7 +54,14 @@ pub const PackageManager = struct {
                 return err;
             };
             break :blk pkg;
-        } else try types.Package.new_from_cwd(self.allocator);
+        } else blk: {
+            var pkg = try types.Package.new_from_cwd(self.allocator);
+            pkg_map.putNoClobber(pkg.name, pkg) catch |err| {
+                pkg.free();
+                return err;
+            };
+            break :blk pkg;
+        };
 
         try pkg_dag.add_child(package.name, null);
 

@@ -69,7 +69,11 @@ pub fn download(allocator: std.mem.Allocator, file: std.fs.File, fetch_url: []co
     const url = try allocator.dupeZ(u8, fetch_url);
     defer allocator.free(url);
 
+    const user_agent = try allocator.dupeZ(u8, "curl/8.13.0");
+    defer allocator.free(user_agent);
+
     _ = libcurl.curl_easy_setopt(curl, libcurl.CURLOPT_URL, url.ptr);
+    _ = libcurl.curl_easy_setopt(curl, libcurl.CURLOPT_USERAGENT, user_agent.ptr);
     _ = libcurl.curl_easy_setopt(curl, libcurl.CURLOPT_FOLLOWLOCATION, @as(usize, 1));
     _ = libcurl.curl_easy_setopt(curl, libcurl.CURLOPT_WRITEFUNCTION, data_cb);
     _ = libcurl.curl_easy_setopt(curl, libcurl.CURLOPT_WRITEDATA, &file);
