@@ -17,7 +17,7 @@ pub const PackageManager = struct {
         return .{ .allocator = allocator, .kiss_config = kiss_config };
     }
 
-    fn find_in_path(self: *PackageManager, pkg_name: []const u8) !std.fs.Dir {
+    fn find_in_path(self: *PackageManager, pkg_name: []const u8) !types.Package {
         var it = std.mem.splitScalar(u8, self.kiss_config.path, ':');
         while (it.next()) |path| {
             if (std.mem.eql(u8, path, "")) continue;
@@ -27,11 +27,11 @@ pub const PackageManager = struct {
 
             std.log.debug("finding package in path {s}", .{pkg_path});
 
-            const dir = std.fs.openDirAbsolute(pkg_path, .{ .access_sub_paths = true, .iterate = true }) catch |err| {
+            var dir = std.fs.openDirAbsolute(pkg_path, .{}) catch |err| {
                 std.log.debug("failed to find package at path {s}: {}", .{ pkg_path, err });
                 continue;
             };
-            return dir;
+            return try types.Package.new(self.allocator, &dir);
         }
 
         std.log.debug("package {s} not found in any path", .{pkg_name});
@@ -39,9 +39,7 @@ pub const PackageManager = struct {
     }
 
     fn construct_dependency_tree(self: *PackageManager, pkg_map: *std.StringHashMap(types.Package), pkg_dag: *dag.DAG([]const u8), pkg_name: ?[]const u8) ![]const u8 {
-        var dir = if (pkg_name != null) try self.find_in_path(pkg_name.?) else try std.fs.cwd().openDir(".", .{ .access_sub_paths = true, .iterate = true });
-
-        var package = try types.Package.new(self.allocator, &dir);
+        var package = if (pkg_name != null) try self.find_in_path(pkg_name.?) else try types.Package.new_from_cwd(self.allocator);
         errdefer package.free();
 
         try pkg_map.putNoClobber(package.name, package);
@@ -132,8 +130,7 @@ pub const PackageManager = struct {
             var package = try types.Package.new(self.allocator, &pkg_dir);
             defer package.free();
 
-            var repo_pkg_dir = try self.find_in_path(entry.name);
-            var repo_pkg = try types.Package.new(self.allocator, &repo_pkg_dir);
+            var repo_pkg = try self.find_in_path(entry.name);
             defer repo_pkg.free();
 
             if (!std.mem.eql(u8, package.version, repo_pkg.version)) {
@@ -142,7 +139,7 @@ pub const PackageManager = struct {
         }
     }
 
-    pub fn handle(self: *PackageManager, command: commands.Command) !void {
+    pub fn handle(self: *PackageManager, command: commands.Command) !bool {
         switch (command) {
             .Alternatives => |alt| {
                 _ = alt;
@@ -151,21 +148,33 @@ pub const PackageManager = struct {
                 _ = build_args;
             },
             .Checksum => |checksum| {
-                for (checksum.?) |package| {
-                    var dir = try self.find_in_path(package);
-                    var pkg = try types.Package.new(self.allocator, &dir);
+                if (checksum == null) {
+                    var pkg = try types.Package.new_from_cwd(self.allocator);
                     defer pkg.free();
 
-                    if (!try pkg.download(true)) return;
+                    return try pkg.download(true);
+                }
+
+                for (checksum.?) |package| {
+                    var pkg = try self.find_in_path(package);
+                    defer pkg.free();
+
+                    if (!try pkg.download(true)) return false;
                 }
             },
             .Download => |download| {
-                for (download.?) |package| {
-                    var dir = try self.find_in_path(package);
-                    var pkg = try types.Package.new(self.allocator, &dir);
+                if (download == null) {
+                    var pkg = try types.Package.new_from_cwd(self.allocator);
                     defer pkg.free();
 
-                    if (!try pkg.download(false)) return;
+                    return try pkg.download(false);
+                }
+
+                for (download.?) |package| {
+                    var pkg = try self.find_in_path(package);
+                    defer pkg.free();
+
+                    if (!try pkg.download(false)) return false;
                 }
             },
             .Install => |install| {
@@ -210,8 +219,8 @@ pub const PackageManager = struct {
                 _ = remove;
             },
             .Search => |search| {
-                if (search == null) return;
-                for (search.?) |package| {
+                if (search == null) return true;
+                outer: for (search.?) |package| {
                     var it = std.mem.splitScalar(u8, self.kiss_config.path, ':');
                     while (it.next()) |path| {
                         if (std.mem.eql(u8, path, "")) continue;
@@ -222,13 +231,20 @@ pub const PackageManager = struct {
 
                         std.posix.access(package, std.posix.F_OK) catch continue;
                         try std.io.getStdOut().writer().print("{s}/{s}\n", .{ path, package });
+
+                        continue :outer;
                     }
+
+                    std.log.err("{ks} not found", .{package});
+                    return false;
                 }
             },
             .Update => try self.update(),
             .Upgrade => try self.upgrade(),
             .Version => try std.io.getStdOut().writer().print("{s}\n", .{"0.0.1"}),
         }
+
+        return true;
     }
 
     pub fn free(self: *PackageManager) void {

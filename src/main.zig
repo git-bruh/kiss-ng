@@ -9,7 +9,7 @@ pub const std_options: std.Options = .{
     .logFn = logger.log,
 };
 
-pub fn main() !void {
+pub fn main() !u8 {
     if (std.os.argv.len < 2) {
         try std.io.getStdOut().writer().print(
             \\-> kiss [a|b|c|d|i|l|p|r|s|u|U|v] [pkg]... 
@@ -44,6 +44,6 @@ pub fn main() !void {
         args[idx] = std.mem.sliceTo(arg, 0);
     }
 
-    const command = commands.parse_command(args) catch std.process.exit(1);
-    try pkg_man.handle(command);
+    const command = try commands.parse_command(args);
+    return if (try pkg_man.handle(command)) 0 else 1;
 }

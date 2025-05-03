@@ -107,6 +107,11 @@ pub const Package = struct {
         };
     }
 
+    pub fn new_from_cwd(allocator: std.mem.Allocator) !Package {
+        var dir = try std.fs.cwd().openDir(".", .{});
+        return try Package.new(allocator, &dir);
+    }
+
     pub fn checksum_verify(self: *const Package) !bool {
         for (self.sources.items) |source| {
             switch (source) {
