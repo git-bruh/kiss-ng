@@ -27,13 +27,12 @@ pub const PackageManager = struct {
         while (it.next()) |path| {
             if (std.mem.eql(u8, path, "")) continue;
 
-            const pkg_path = try std.mem.concat(self.allocator, u8, &.{ path, "/", pkg_name });
-            defer self.allocator.free(pkg_path);
+            std.log.debug("finding package {ks} in path {ks}", .{ pkg_name, path });
 
-            std.log.debug("finding package in path {s}", .{pkg_path});
-
-            var dir = std.fs.openDirAbsolute(pkg_path, .{}) catch |err| {
-                std.log.debug("failed to find package at path {s}: {}", .{ pkg_path, err });
+            var repo_dir = try std.fs.openDirAbsolute(path, .{});
+            defer repo_dir.close();
+            var dir = repo_dir.openDir(pkg_name, .{}) catch |err| {
+                std.log.debug("failed to find package {ks} at path {ks}: {}", .{ pkg_name, path, err });
                 continue;
             };
             return try types.Package.new(self.allocator, &dir);
