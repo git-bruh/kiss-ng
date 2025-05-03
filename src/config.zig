@@ -87,6 +87,13 @@ pub const Config = struct {
         return prev_dir;
     }
 
+    pub fn get_installed_dir(self: *const Config) !std.fs.Dir {
+        var root_dir = try std.fs.openDirAbsolute(self.root orelse "/", .{});
+        defer root_dir.close();
+
+        return try root_dir.openDir(DB_PATH_INSTALLED, .{ .iterate = true });
+    }
+
     pub fn free(self: *Config) void {
         self.allocator.free(self.path);
         if (self.root != null) self.allocator.free(self.root.?);

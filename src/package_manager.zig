@@ -9,6 +9,11 @@ const PackageFindError = error{
     PackageNotFound,
 };
 
+const BuildFilter = enum {
+    SkipInstalled,
+    SkipInstalledIfSameVersion,
+};
+
 pub const PackageManager = struct {
     allocator: std.mem.Allocator,
     kiss_config: config.Config,
@@ -38,29 +43,53 @@ pub const PackageManager = struct {
         return PackageFindError.PackageNotFound;
     }
 
-    fn construct_dependency_tree(self: *PackageManager, pkg_map: *std.StringHashMap(types.Package), pkg_dag: *dag.DAG([]const u8), pkg_name: ?[]const u8) ![]const u8 {
+    fn construct_dependency_tree(
+        self: *PackageManager,
+        pkg_map: *std.StringHashMap(types.Package),
+        installed_pkg_map: *std.StringHashMap(types.Package),
+        pkg_dag: *dag.DAG([]const u8),
+        filter: BuildFilter,
+        pkg_name: ?[]const u8,
+    ) ![]const u8 {
         var package = if (pkg_name != null) try self.find_in_path(pkg_name.?) else try types.Package.new_from_cwd(self.allocator);
-        errdefer package.free();
 
-        try pkg_map.putNoClobber(package.name, package);
+        pkg_map.putNoClobber(package.name, package) catch |err| {
+            package.free();
+            return err;
+        };
         try pkg_dag.add_child(package.name, null);
 
-        for (package.dependencies.items) |dependency| {
-            try pkg_dag.add_child(package.name, dependency.name);
+        outer: for (package.dependencies.items) |dependency| {
+            const dep_pkg = pkg_map.get(dependency.name) orelse blk: {
+                std.log.debug("looking up dependency {s} of {s}", .{ dependency.name, package.name });
+                _ = try self.construct_dependency_tree(pkg_map, installed_pkg_map, pkg_dag, filter, dependency.name);
+                break :blk pkg_map.get(dependency.name) orelse unreachable;
+            };
 
-            if (pkg_map.contains(dependency.name)) {
-                std.log.debug("dependency {s} of {s} already parsed, skipping", .{ dependency.name, package.name });
-                continue;
+            const installed_dep_pkg = installed_pkg_map.get(dependency.name) orelse blk: {
+                var installed_dir = try self.kiss_config.get_installed_dir();
+                defer installed_dir.close();
+
+                var pkg_dir = installed_dir.openDir(dependency.name, .{}) catch break :blk null;
+                const installed_pkg = try types.Package.new(self.allocator, &pkg_dir);
+                try installed_pkg_map.putNoClobber(dependency.name, installed_pkg);
+                break :blk installed_pkg;
+            };
+
+            if (installed_dep_pkg != null) {
+                switch (filter) {
+                    .SkipInstalled => continue :outer,
+                    .SkipInstalledIfSameVersion => if (std.mem.eql(u8, dep_pkg.version, installed_dep_pkg.?.version)) continue :outer,
+                }
             }
 
-            std.log.debug("looking up dependency {s} of {s}", .{ dependency.name, package.name });
-            _ = try self.construct_dependency_tree(pkg_map, pkg_dag, dependency.name);
+            try pkg_dag.add_child(package.name, dependency.name);
         }
 
         return package.name;
     }
 
-    fn build(self: *PackageManager, pkg_name: ?[]const u8) !void {
+    fn build(self: *PackageManager, pkg_name: ?[][]const u8) !bool {
         var pkg_map = std.StringHashMap(types.Package).init(self.allocator);
         defer {
             var it = pkg_map.iterator();
@@ -68,10 +97,31 @@ pub const PackageManager = struct {
             pkg_map.deinit();
         }
 
+        var installed_pkg_map = std.StringHashMap(types.Package).init(self.allocator);
+        defer {
+            var it = installed_pkg_map.iterator();
+            while (it.next()) |entry| entry.value_ptr.free();
+            installed_pkg_map.deinit();
+        }
+
         var pkg_dag = dag.DAG([]const u8).init(self.allocator);
         defer pkg_dag.deinit();
 
-        const root_pkg = try self.construct_dependency_tree(&pkg_map, &pkg_dag, pkg_name);
+        const root_pkg = "_kiss_ng_root";
+
+        if (pkg_name == null) {
+            try pkg_dag.add_child(
+                root_pkg,
+                try self.construct_dependency_tree(&pkg_map, &installed_pkg_map, &pkg_dag, .SkipInstalled, null),
+            );
+        } else {
+            for (pkg_name.?) |pkg| {
+                try pkg_dag.add_child(
+                    root_pkg,
+                    try self.construct_dependency_tree(&pkg_map, &installed_pkg_map, &pkg_dag, .SkipInstalled, pkg),
+                );
+            }
+        }
 
         var sorted = std.ArrayList([]const u8).init(self.allocator);
         defer sorted.deinit();
@@ -81,6 +131,8 @@ pub const PackageManager = struct {
         for (sorted.items, 0..) |item, idx| {
             std.log.debug("Build Order: {d}, Package: {s}", .{ idx, item });
         }
+
+        return true;
     }
 
     fn update(self: *PackageManager) !void {
@@ -118,15 +170,12 @@ pub const PackageManager = struct {
     }
 
     fn upgrade(self: *PackageManager) !void {
-        try std.posix.chdir(self.kiss_config.root orelse "/");
-        try std.posix.chdir(config.DB_PATH_INSTALLED);
+        var installed_dir = try self.kiss_config.get_installed_dir();
+        defer installed_dir.close();
 
-        var dir = try std.fs.cwd().openDir(".", .{ .iterate = true });
-        defer dir.close();
-
-        var it = dir.iterate();
+        var it = installed_dir.iterate();
         while (try it.next()) |entry| {
-            var pkg_dir = try std.fs.cwd().openDir(entry.name, .{});
+            var pkg_dir = try installed_dir.openDir(entry.name, .{});
             var package = try types.Package.new(self.allocator, &pkg_dir);
             defer package.free();
 
@@ -144,9 +193,7 @@ pub const PackageManager = struct {
             .Alternatives => |alt| {
                 _ = alt;
             },
-            .Build => |build_args| {
-                _ = build_args;
-            },
+            .Build => |build_args| return try self.build(build_args),
             .Checksum => |checksum| {
                 if (checksum == null) {
                     var pkg = try types.Package.new_from_cwd(self.allocator);
@@ -181,16 +228,13 @@ pub const PackageManager = struct {
                 _ = install;
             },
             .List => |list| {
-                try std.posix.chdir(self.kiss_config.root orelse "/");
-                try std.posix.chdir(config.DB_PATH_INSTALLED);
-
-                var dir = try std.fs.cwd().openDir(".", .{ .iterate = true });
-                defer dir.close();
+                var installed_dir = try self.kiss_config.get_installed_dir();
+                defer installed_dir.close();
 
                 if (list == null) {
-                    var it = dir.iterate();
+                    var it = installed_dir.iterate();
                     while (try it.next()) |entry| {
-                        var pkg_dir = try std.fs.cwd().openDir(entry.name, .{});
+                        var pkg_dir = try installed_dir.openDir(entry.name, .{});
                         var package = try types.Package.new(self.allocator, &pkg_dir);
                         defer package.free();
 
@@ -198,7 +242,7 @@ pub const PackageManager = struct {
                     }
                 } else {
                     for (list.?) |pkg_name| {
-                        var pkg_dir = std.fs.cwd().openDir(pkg_name, .{}) catch |err| {
+                        var pkg_dir = installed_dir.openDir(pkg_name, .{}) catch |err| {
                             if (err == error.FileNotFound) {
                                 std.log.err("{ks} not found", .{pkg_name});
                                 continue;
@@ -208,7 +252,7 @@ pub const PackageManager = struct {
                         var package = try types.Package.new(self.allocator, &pkg_dir);
                         defer package.free();
 
-                        try std.io.getStdOut().writer().print("{s} {s}", .{ package.name, package.version });
+                        try std.io.getStdOut().writer().print("{s} {s}\n", .{ package.name, package.version });
                     }
                 }
             },
