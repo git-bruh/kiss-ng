@@ -119,64 +119,7 @@ pub const Package = struct {
         self.implicit = true;
     }
 
-    pub fn checksum_verify(self: *const Package) !bool {
-        std.log.info("verifying checksums for {ks}", .{self.name});
-
-        for (self.sources.items) |source| {
-            switch (source) {
-                .Git => |git| {
-                    std.log.info("skipping checksum for git source {ks}", .{git.clone_url});
-                    continue;
-                },
-                .Http => |http| {
-                    const file_name = sliceNameFromUrl(http.fetch_url);
-                    const dir = try config.Config.get_source_dir(self.name, http.build_path);
-                    const file = dir.openFile(file_name, .{}) catch |err| {
-                        std.log.err("failed to open remote file {ks} for verification {}", .{ file_name, err });
-                        return false;
-                    };
-                    defer file.close();
-
-                    var b3sum: checksum.CHECKSUM = undefined;
-                    try checksum.b3sum(file, &b3sum);
-
-                    if (std.mem.eql(u8, &b3sum, http.checksum orelse {
-                        std.log.err("no checksum present for file {ks}", .{file_name});
-                        return false;
-                    })) {
-                        std.log.info("checksum matched {ks} {ks}", .{ b3sum, file_name });
-                    } else {
-                        std.log.info("checksum mismatch {ks} {ks}", .{ b3sum, file_name });
-                        return false;
-                    }
-                },
-                .Local => |local| {
-                    const file = self.dir.openFile(local.path, .{}) catch |err| {
-                        std.log.err("failed to open local file {ks} for verification: {}", .{ local.path, err });
-                        return false;
-                    };
-                    defer file.close();
-
-                    var b3sum: checksum.CHECKSUM = undefined;
-                    try checksum.b3sum(file, &b3sum);
-
-                    if (std.mem.eql(u8, &b3sum, local.checksum orelse {
-                        std.log.err("no checksum present for file {ks}", .{local.path});
-                        return false;
-                    })) {
-                        std.log.info("checksum matched {ks} {ks}", .{ b3sum, local.path });
-                    } else {
-                        std.log.info("checksum mismatch {ks} {ks}", .{ b3sum, local.path });
-                        return false;
-                    }
-                },
-            }
-        }
-
-        return true;
-    }
-
-    pub fn download(self: *const Package, generate_checksum: bool) !bool {
+    pub fn download_and_verify(self: *const Package, generate_checksum: bool) !bool {
         const checksums = if (generate_checksum) try self.dir.createFile("checksums", .{}) else null;
         defer if (checksums) |f| f.close();
 
@@ -224,7 +167,19 @@ pub const Package = struct {
 
                     var b3sum: checksum.CHECKSUM = undefined;
                     try checksum.b3sum(file, &b3sum);
-                    if (checksums) |f| try f.writer().print("{s}\n", .{b3sum});
+                    if (checksums) |f| {
+                        try f.writer().print("{s}\n", .{b3sum});
+                    } else {
+                        if (std.mem.eql(u8, &b3sum, http.checksum orelse {
+                            std.log.err("no checksum present for file {ks}", .{file_name});
+                            return false;
+                        })) {
+                            std.log.info("checksum matched {ks} {ks}", .{ b3sum, file_name });
+                        } else {
+                            std.log.info("checksum mismatch {ks} {ks}", .{ b3sum, file_name });
+                            return false;
+                        }
+                    }
                 },
                 .Local => |local| {
                     const file = self.dir.openFile(local.path, .{}) catch |err| {
@@ -236,7 +191,19 @@ pub const Package = struct {
 
                     var b3sum: checksum.CHECKSUM = undefined;
                     try checksum.b3sum(file, &b3sum);
-                    if (checksums) |f| try f.writer().print("{s}\n", .{b3sum});
+                    if (checksums) |f| {
+                        try f.writer().print("{s}\n", .{b3sum});
+                    } else {
+                        if (std.mem.eql(u8, &b3sum, local.checksum orelse {
+                            std.log.err("no checksum present for file {ks}", .{local.path});
+                            return false;
+                        })) {
+                            std.log.info("checksum matched {ks} {ks}", .{ b3sum, local.path });
+                        } else {
+                            std.log.info("checksum mismatch {ks} {ks}", .{ b3sum, local.path });
+                            return false;
+                        }
+                    }
                 },
             }
         }

@@ -123,7 +123,7 @@ pub const PackageManager = struct {
         if (sorted.items.len == 0) return true;
 
         var it = pkg_map.valueIterator();
-        while (it.next()) |pkg| if (!try pkg.checksum_verify()) return false;
+        while (it.next()) |pkg| if (!try pkg.download_and_verify(false)) return false;
 
         for (sorted.items[0 .. sorted.items.len - 1], 0..) |item, idx| {
             const pkg = pkg_map.get(item) orelse unreachable;
@@ -194,7 +194,7 @@ pub const PackageManager = struct {
         if (sorted.items.len == 0) return true;
 
         // must verify from the sorted array here because pkg_map contains all packages
-        for (sorted.items[0 .. sorted.items.len - 1]) |pkg_name| if (!try (pkg_map.get(pkg_name) orelse unreachable).checksum_verify()) return false;
+        for (sorted.items[0 .. sorted.items.len - 1]) |pkg_name| if (!try (pkg_map.get(pkg_name) orelse unreachable).download_and_verify(false)) return false;
 
         for (sorted.items[0 .. sorted.items.len - 1], 0..) |item, idx| {
             const pkg = pkg_map.get(item) orelse unreachable;
@@ -252,14 +252,14 @@ pub const PackageManager = struct {
                     var pkg = try types.Package.new_from_cwd(self.allocator);
                     defer pkg.free();
 
-                    return try pkg.download(true);
+                    return try pkg.download_and_verify(true);
                 }
 
                 for (checksum.?) |package| {
                     var pkg = try self.find_in_path(package);
                     defer pkg.free();
 
-                    if (!try pkg.download(true)) return false;
+                    if (!try pkg.download_and_verify(true)) return false;
                 }
             },
             .Download => |download| {
@@ -267,14 +267,14 @@ pub const PackageManager = struct {
                     var pkg = try types.Package.new_from_cwd(self.allocator);
                     defer pkg.free();
 
-                    return try pkg.download(false);
+                    return try pkg.download_and_verify(false);
                 }
 
                 for (download.?) |package| {
                     var pkg = try self.find_in_path(package);
                     defer pkg.free();
 
-                    if (!try pkg.download(false)) return false;
+                    if (!try pkg.download_and_verify(false)) return false;
                 }
             },
             .Install => |install| {
