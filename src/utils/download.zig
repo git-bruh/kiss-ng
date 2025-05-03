@@ -21,10 +21,6 @@ fn progress_cb(userdata: *anyopaque, dltotal: libcurl.curl_off_t, dlnow: libcurl
     _ = ultotal;
     _ = ulnow;
 
-    if (dltotal == 0) {
-        return 0;
-    }
-
     var winsize: std.posix.winsize = undefined;
     const err = std.posix.system.ioctl(std.c.STDOUT_FILENO, std.posix.T.IOCGWINSZ, @intFromPtr(&winsize));
     if (std.posix.errno(err) != .SUCCESS) winsize.col = 80;
@@ -35,8 +31,8 @@ fn progress_cb(userdata: *anyopaque, dltotal: libcurl.curl_off_t, dlnow: libcurl
     const now = std.time.Instant.now() catch unreachable;
 
     const speed = @as(f64, @floatFromInt(dlnow)) / (@as(f64, @floatFromInt(now.since(data.begin))) / std.time.ns_per_s);
-    const time_left = @as(f64, @floatFromInt(dltotal)) / speed;
-    const percentage = @as(f64, @floatFromInt(dlnow)) / @as(f64, @floatFromInt(dltotal));
+    const time_left = if (dltotal != 0) @as(f64, @floatFromInt(dltotal)) / speed else 0;
+    const percentage = if (dltotal != 0) @as(f64, @floatFromInt(dlnow)) / @as(f64, @floatFromInt(dltotal)) else 0;
 
     // <TOTAL_SIZE> <SPEED> <MM:SS> [###...] <PERCENTAGE>
     var buffer: [512]u8 = undefined;
