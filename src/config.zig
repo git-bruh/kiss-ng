@@ -1,4 +1,5 @@
 const std = @import("std");
+const fs = @import("utils/fs.zig");
 
 pub const DB_PATH = "var/db/kiss";
 pub const DB_PATH_INSTALLED = DB_PATH ++ "/installed";
@@ -61,19 +62,20 @@ pub const Config = struct {
     }
 
     pub fn get_source_dir(pkg_name: []const u8, build_path: ?[]const u8) !std.fs.Dir {
-        try ensureDir(std.fs.makeDirAbsolute(CACHE_PATH ++ "/sources"));
+        try fs.ensureDir(std.fs.makeDirAbsolute(CACHE_PATH ++ "/sources"));
         var cache_dir = try std.fs.openDirAbsolute(CACHE_PATH ++ "/sources", .{});
         defer cache_dir.close();
 
-        try ensureDir(cache_dir.makeDir(pkg_name));
+        try fs.ensureDir(cache_dir.makeDir(pkg_name));
 
-        const pkg_dir = try cache_dir.openDir(pkg_name, .{});
+        var pkg_dir = try cache_dir.openDir(pkg_name, .{});
         if (build_path == null) return pkg_dir;
-        return try mkdirParents(pkg_dir, build_path.?);
+        defer pkg_dir.close(); // will be duplicated in mkdirParents
+        return try fs.mkdirParents(pkg_dir, build_path.?);
     }
 
     pub fn get_bin_dir() !std.fs.Dir {
-        try ensureDir(std.fs.makeDirAbsolute(CACHE_PATH ++ "/bin"));
+        try fs.ensureDir(std.fs.makeDirAbsolute(CACHE_PATH ++ "/bin"));
         return try std.fs.openDirAbsolute(CACHE_PATH ++ "/bin", .{});
     }
 
@@ -88,11 +90,11 @@ pub const Config = struct {
         const buf: ["YYYY-MM-DD".len]u8 = undefined;
         try std.fmt.bufPrint(&buf, "{d}-{d:02}-{d:02}", .{ year_day.year, month_day.month.numeric(), month_day.day_index });
 
-        try ensureDir(std.fs.makeDirAbsolute(CACHE_PATH ++ "/logs"));
+        try fs.ensureDir(std.fs.makeDirAbsolute(CACHE_PATH ++ "/logs"));
         const cache_dir = try std.fs.openDirAbsolute(CACHE_PATH ++ "/logs", .{});
         defer cache_dir.close();
 
-        try ensureDir(cache_dir.makeDir(buf));
+        try fs.ensureDir(cache_dir.makeDir(buf));
         return try cache_dir.openDir(buf, .{});
     }
 
@@ -100,7 +102,7 @@ pub const Config = struct {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
         const path = try std.fmt.bufPrint(&buf, "{s}/{d}/{s}", .{ self.tmpdir orelse (CACHE_PATH ++ "/proc"), std.os.linux.getpid(), pkg_name });
 
-        return try mkdirParents(null, path);
+        return try fs.mkdirParents(null, path);
     }
 
     pub fn get_installed_dir(self: *const Config) !std.fs.Dir {
@@ -115,21 +117,3 @@ pub const Config = struct {
         if (self.root != null) self.allocator.free(self.root.?);
     }
 };
-
-fn ensureDir(err: anytype) !void {
-    if (err == error.PathAlreadyExists) return;
-    return err;
-}
-
-fn mkdirParents(dir: ?std.fs.Dir, path: []const u8) !std.fs.Dir {
-    var prev_dir = if (dir != null) dir.? else try std.fs.openDirAbsolute("/", .{});
-    var it = std.mem.splitScalar(u8, path, '/');
-    while (it.next()) |sub_path| {
-        errdefer prev_dir.close();
-        try ensureDir(prev_dir.makeDir(sub_path));
-        const new_dir = try prev_dir.openDir(sub_path, .{});
-        prev_dir.close();
-        prev_dir = new_dir;
-    }
-    return prev_dir;
-}

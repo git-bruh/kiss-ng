@@ -3,6 +3,8 @@ const config = @import("./config.zig");
 const checksum = @import("utils/checksum.zig");
 const curl_download = @import("utils/download.zig");
 const git_util = @import("utils/git.zig");
+const archive = @import("utils/archive.zig");
+const fs = @import("utils/fs.zig");
 
 /// A dependency can either be build time (needed just for building the package)
 /// or runtime (needed both at build time and runtime)
@@ -123,90 +125,88 @@ pub const Package = struct {
         const checksums = if (generate_checksum) try self.dir.createFile("checksums", .{}) else null;
         defer if (checksums) |f| f.close();
 
-        for (self.sources.items) |source| {
-            switch (source) {
-                .Git => |git| {
-                    var cache_dir = try config.Config.get_source_dir(self.name, git.build_path);
-                    defer cache_dir.close();
+        for (self.sources.items) |source| switch (source) {
+            .Git => |git| {
+                var cache_dir = try config.Config.get_source_dir(self.name, git.build_path);
+                defer cache_dir.close();
 
-                    const dir_name = sliceNameFromUrl(git.clone_url);
-                    cache_dir.makeDir(dir_name) catch |err| {
-                        if (err != error.PathAlreadyExists) return err;
-                    };
-                    var git_dir = try cache_dir.openDir(dir_name, .{});
-                    defer git_dir.close();
+                const dir_name = sliceNameFromUrl(git.clone_url);
+                cache_dir.makeDir(dir_name) catch |err| {
+                    if (err != error.PathAlreadyExists) return err;
+                };
+                var git_dir = try cache_dir.openDir(dir_name, .{});
+                defer git_dir.close();
 
-                    std.log.info("fetching git repo {ks}{ks}{ks}", .{ git.clone_url, "@", git.commit_hash orelse "HEAD" });
-                    if (!try git_util.initAndPull(self.allocator, git_dir, git.clone_url, git.commit_hash)) {
+                std.log.info("fetching git repo {ks}{ks}{ks}", .{ git.clone_url, "@", git.commit_hash orelse "HEAD" });
+                if (!try git_util.initAndPull(self.allocator, git_dir, git.clone_url, git.commit_hash)) {
+                    return false;
+                }
+            },
+            .Http => |http| {
+                var cache_dir = try config.Config.get_source_dir(self.name, http.build_path);
+                defer cache_dir.close();
+
+                const file_name = sliceNameFromUrl(http.fetch_url);
+                var file = cache_dir.openFile(file_name, .{}) catch |err| blk: {
+                    if (err != error.FileNotFound) return err;
+
+                    var tmp_file_buf: [std.fs.max_path_bytes]u8 = undefined;
+                    const tmp_file_name = try std.fmt.bufPrint(&tmp_file_buf, ".{s}", .{file_name});
+                    const tmp_file = try cache_dir.createFile(tmp_file_name, .{});
+                    defer tmp_file.close();
+
+                    std.log.info("fetching remote file {ks}", .{http.fetch_url});
+                    if (!try curl_download.download(self.allocator, tmp_file, http.fetch_url)) {
                         return false;
                     }
-                },
-                .Http => |http| {
-                    var cache_dir = try config.Config.get_source_dir(self.name, http.build_path);
-                    defer cache_dir.close();
 
-                    const file_name = sliceNameFromUrl(http.fetch_url);
-                    var file = cache_dir.openFile(file_name, .{}) catch |err| blk: {
-                        if (err != error.FileNotFound) return err;
+                    try cache_dir.rename(tmp_file_name, file_name);
+                    break :blk try cache_dir.openFile(file_name, .{});
+                };
+                defer file.close();
+                std.log.info("found remote file {ks}", .{file_name});
 
-                        var tmp_file_buf: [std.fs.max_path_bytes]u8 = undefined;
-                        const tmp_file_name = try std.fmt.bufPrint(&tmp_file_buf, ".{s}", .{file_name});
-                        const tmp_file = try cache_dir.createFile(tmp_file_name, .{});
-                        defer tmp_file.close();
-
-                        std.log.info("fetching remote file {ks}", .{http.fetch_url});
-                        if (!try curl_download.download(self.allocator, tmp_file, http.fetch_url)) {
-                            return false;
-                        }
-
-                        try cache_dir.rename(tmp_file_name, file_name);
-                        break :blk try cache_dir.openFile(file_name, .{});
-                    };
-                    defer file.close();
-                    std.log.info("found remote file {ks}", .{file_name});
-
-                    var b3sum: checksum.CHECKSUM = undefined;
-                    try checksum.b3sum(file, &b3sum);
-                    if (checksums) |f| {
-                        try f.writer().print("{s}\n", .{b3sum});
-                    } else {
-                        if (std.mem.eql(u8, &b3sum, http.checksum orelse {
-                            std.log.err("no checksum present for file {ks}", .{file_name});
-                            return false;
-                        })) {
-                            std.log.info("checksum matched {ks} {ks}", .{ b3sum, file_name });
-                        } else {
-                            std.log.info("checksum mismatch {ks} {ks}", .{ b3sum, file_name });
-                            return false;
-                        }
-                    }
-                },
-                .Local => |local| {
-                    const file = self.dir.openFile(local.path, .{}) catch |err| {
-                        std.log.err("failed to open local file {ks} for checksum generation: {}", .{ local.path, err });
+                var b3sum: checksum.CHECKSUM = undefined;
+                try checksum.b3sum(file, &b3sum);
+                if (checksums) |f| {
+                    try f.writer().print("{s}\n", .{b3sum});
+                } else {
+                    if (std.mem.eql(u8, &b3sum, http.checksum orelse {
+                        std.log.err("no checksum present for file {ks}", .{file_name});
                         return false;
-                    };
-                    defer file.close();
-                    std.log.info("found local file {ks}", .{local.path});
-
-                    var b3sum: checksum.CHECKSUM = undefined;
-                    try checksum.b3sum(file, &b3sum);
-                    if (checksums) |f| {
-                        try f.writer().print("{s}\n", .{b3sum});
+                    })) {
+                        std.log.info("checksum matched {ks} {ks}", .{ b3sum, file_name });
                     } else {
-                        if (std.mem.eql(u8, &b3sum, local.checksum orelse {
-                            std.log.err("no checksum present for file {ks}", .{local.path});
-                            return false;
-                        })) {
-                            std.log.info("checksum matched {ks} {ks}", .{ b3sum, local.path });
-                        } else {
-                            std.log.info("checksum mismatch {ks} {ks}", .{ b3sum, local.path });
-                            return false;
-                        }
+                        std.log.info("checksum mismatch {ks} {ks}", .{ b3sum, file_name });
+                        return false;
                     }
-                },
-            }
-        }
+                }
+            },
+            .Local => |local| {
+                const file = self.dir.openFile(local.path, .{}) catch |err| {
+                    std.log.err("failed to open local file {ks} for checksum generation: {}", .{ local.path, err });
+                    return false;
+                };
+                defer file.close();
+                std.log.info("found local file {ks}", .{local.path});
+
+                var b3sum: checksum.CHECKSUM = undefined;
+                try checksum.b3sum(file, &b3sum);
+                if (checksums) |f| {
+                    try f.writer().print("{s}\n", .{b3sum});
+                } else {
+                    if (std.mem.eql(u8, &b3sum, local.checksum orelse {
+                        std.log.err("no checksum present for file {ks}", .{local.path});
+                        return false;
+                    })) {
+                        std.log.info("checksum matched {ks} {ks}", .{ b3sum, local.path });
+                    } else {
+                        std.log.info("checksum mismatch {ks} {ks}", .{ b3sum, local.path });
+                        return false;
+                    }
+                }
+            },
+        };
 
         return true;
     }
@@ -214,6 +214,34 @@ pub const Package = struct {
     pub fn build(self: *const Package, kiss_config: *const config.Config) !void {
         var build_dir = try kiss_config.get_build_dir(self.name);
         defer build_dir.close();
+
+        for (self.sources.items) |source| switch (source) {
+            .Git => |git| _ = git,
+            .Http => |http| {
+                var cache_dir = try config.Config.get_source_dir(self.name, http.build_path);
+                defer cache_dir.close();
+
+                var sub_build_dir = if (http.build_path) |path| try fs.mkdirParents(build_dir, path) else null;
+                defer if (sub_build_dir != null) sub_build_dir.?.close();
+
+                const file_name = sliceNameFromUrl(http.fetch_url);
+                std.log.info("handling remote source {ks}", .{file_name});
+
+                if (archive.is_extractable(file_name)) {
+                    var file = try cache_dir.openFile(file_name, .{});
+                    defer file.close();
+                    try archive.extract(sub_build_dir orelse build_dir, file);
+                }
+            },
+            .Local => |local| {
+                std.log.info("handling local source {ks}", .{local.path});
+
+                var sub_build_dir = if (local.build_path) |path| try fs.mkdirParents(build_dir, path) else null;
+                defer if (sub_build_dir != null) sub_build_dir.?.close();
+
+                try self.dir.copyFile(local.path, sub_build_dir orelse build_dir, std.fs.path.basename(local.path), .{});
+            },
+        };
     }
 
     pub fn install(self: *const Package) !void {

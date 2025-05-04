@@ -35,6 +35,7 @@ pub fn build(b: *std.Build) void {
     exe.linkSystemLibrary("c");
     exe.linkSystemLibrary("blake3");
     exe.linkSystemLibrary("curl");
+    exe.linkSystemLibrary("archive");
 
     const dag_zig = b.dependency("dag_zig", .{
         .target = target,

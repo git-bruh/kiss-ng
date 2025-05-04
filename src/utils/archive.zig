@@ -11,8 +11,8 @@ const ArchiveError = error{
 };
 
 // returns whether to retry
-fn check(res: c_int) !void {
-    const err = libarchive.archive_error_string(libarchive.archive_errno());
+fn check(archive: ?*libarchive.struct_archive, res: c_int) ArchiveError!void {
+    const err = libarchive.archive_error_string(archive);
 
     switch (res) {
         libarchive.ARCHIVE_OK => return,
@@ -27,46 +27,63 @@ fn check(res: c_int) !void {
 }
 
 fn strip_components(path: [*c]const u8) ?[*c]const u8 {
-    const first_slash = std.mem.indexOfScalar(u8, path, '/') orelse return null;
-    for (first_slash + 1..path.len) |idx| {
+    const first_slash = blk: {
+        var idx: usize = 0;
+        while (true) {
+            if (path[idx] == 0) break;
+            if (path[idx] == '/') break :blk idx;
+            idx += 1;
+        }
+        return null;
+    };
+
+    var idx = first_slash;
+    while (true) {
         if (path[idx] == 0) return null;
-        if (path[idx] != '/') return path[idx..path.len];
+        if (path[idx] != '/') return &path[idx];
+        idx += 1;
     }
+
     unreachable;
 }
 
-pub fn extract(allocator: std.mem.Allocator, file_name: []const u8) !void {
-    const archive = libarchive.archive_read_new() orelse @panic("archive_read_new() failed");
+pub fn extract(dir: std.fs.Dir, file: std.fs.File) !void {
+    var cwd = try std.fs.cwd().openDir(".", .{});
     defer {
-        libarchive.archive_read_close(archive);
-        libarchive.archive_read_free(archive);
+        std.posix.fchdir(cwd.fd) catch |err| std.log.err("failed to change to original dir after extract: {}", .{err});
+        cwd.close();
     }
 
-    try check(libarchive.archive_read_support_format_all(archive));
-    try check(libarchive.archive_read_support_filter_all(archive));
+    try std.posix.fchdir(dir.fd);
 
-    const c_file_name = try allocator.dupeZ(file_name);
-    defer allocator.free(c_file_name);
+    const archive = libarchive.archive_read_new() orelse @panic("archive_read_new() failed");
+    defer {
+        if (libarchive.archive_read_close(archive) != libarchive.ARCHIVE_OK) @panic("archive_read_close() failed");
+        if (libarchive.archive_read_free(archive) != libarchive.ARCHIVE_OK) @panic("archive_read_free() failed");
+    }
+
+    try check(archive, libarchive.archive_read_support_format_all(archive));
+    try check(archive, libarchive.archive_read_support_filter_all(archive));
 
     // default block size from bsdtar
-    try check(libarchive.archive_read_open_filename(archive, c_file_name, 20 * 512));
+    try check(archive, libarchive.archive_read_open_fd(archive, file.handle, 20 * 512));
 
     while (true) {
-        var entry: *libarchive.archive_entry = null;
-        check(libarchive.archive_read_next_header(archive, &entry)) catch |err| switch (err) {
-            .Eof => return,
-            .Retry => continue,
+        var entry: ?*libarchive.archive_entry = null;
+        check(archive, libarchive.archive_read_next_header(archive, &entry)) catch |err| switch (err) {
+            ArchiveError.Eof => return,
+            ArchiveError.Retry => continue,
             else => return err,
         };
 
         // remove components before the first slash to ensure we extract
         // without creating sub-directories
-        if (strip_components(libarchive.archive_entry_pathname())) |path| {
-            libarchive.archive_entry_copy_pathname(path);
+        if (strip_components(libarchive.archive_entry_pathname(entry))) |path| {
+            libarchive.archive_entry_copy_pathname(entry, path);
         }
         if (libarchive.archive_entry_hardlink(entry)) |hardlink| {
             if (strip_components(hardlink)) |path| {
-                libarchive.archive_entry_copy_hardlink(path);
+                libarchive.archive_entry_copy_hardlink(entry, path);
             }
         }
 
@@ -76,8 +93,8 @@ pub fn extract(allocator: std.mem.Allocator, file_name: []const u8) !void {
             libarchive.ARCHIVE_EXTRACT_NO_OVERWRITE |
             libarchive.ARCHIVE_EXTRACT_TIME;
         while (true) {
-            check(libarchive.archive_read_extract(archive, entry, flags)) catch |err| {
-                if (err == .Retry) continue;
+            check(archive, libarchive.archive_read_extract(archive, entry, flags)) catch |err| {
+                if (err == ArchiveError.Retry) continue;
                 return err;
             };
             break;
@@ -92,9 +109,9 @@ pub fn is_extractable(path: []const u8) bool {
         if (it.peek() == null) {
             return (
                 // file.tar
-                std.mem.eql(u8, ext, "tar") ||
+                std.mem.eql(u8, ext, "tar") or
                     // file.tar.{gz,zst,...}
-                    std.mem.eql(u8, last_component orelse "", "tar") ||
+                    std.mem.eql(u8, last_component orelse "", "tar") or
                     // file.t{g,...}z
                     (ext.len == 3 and ext[0] == 't' and ext[2] == 'z'));
         }
