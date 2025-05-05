@@ -19,3 +19,32 @@ pub fn mkdirParents(dir: ?std.fs.Dir, path: []const u8) !std.fs.Dir {
     }
     return prev_dir;
 }
+
+pub fn copyDir(src_dir: std.fs.Dir, target_dir: std.fs.Dir) !void {
+    var it = src_dir.iterate();
+    while (try it.next()) |entry| {
+        switch (entry.kind) {
+            .directory => {
+                var src = try src_dir.openDir(entry.name, .{ .iterate = true });
+                defer src.close();
+
+                try target_dir.makeDir(entry.name);
+
+                var target = try target_dir.openDir(entry.name, .{ .iterate = true });
+                defer target.close();
+
+                try copyDir(src, target);
+            },
+            .sym_link => {
+                var buf: [std.fs.max_path_bytes]u8 = undefined;
+                const link = try src_dir.readLink(entry.name, &buf);
+                try target_dir.symLink(entry.name, link, .{});
+            },
+            .file => try src_dir.copyFile(entry.name, target_dir, entry.name, .{}),
+            else => {
+                std.log.err("unsupported file {ks} of kind {}", .{ entry.name, entry.kind });
+                return error.InvalidArgument;
+            },
+        }
+    }
+}

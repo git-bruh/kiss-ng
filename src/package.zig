@@ -216,7 +216,22 @@ pub const Package = struct {
         defer build_dir.close();
 
         for (self.sources.items) |source| switch (source) {
-            .Git => |git| _ = git,
+            .Git => |git| {
+                std.log.info("handling git source {ks}", .{git.clone_url});
+
+                var cache_dir = try config.Config.get_source_dir(self.name, git.build_path);
+                defer cache_dir.close();
+
+                var sub_build_dir = if (git.build_path) |path| try fs.mkdirParents(build_dir, path) else null;
+                defer if (sub_build_dir != null) sub_build_dir.?.close();
+
+                const dir_name = sliceNameFromUrl(git.clone_url);
+
+                var git_dir = try cache_dir.openDir(dir_name, .{ .iterate = true });
+                defer git_dir.close();
+
+                try fs.copyDir(git_dir, sub_build_dir orelse build_dir);
+            },
             .Http => |http| {
                 var cache_dir = try config.Config.get_source_dir(self.name, http.build_path);
                 defer cache_dir.close();
@@ -231,6 +246,8 @@ pub const Package = struct {
                     var file = try cache_dir.openFile(file_name, .{});
                     defer file.close();
                     try archive.extract(sub_build_dir orelse build_dir, file);
+                } else {
+                    try cache_dir.copyFile(file_name, sub_build_dir orelse build_dir, file_name, .{});
                 }
             },
             .Local => |local| {
