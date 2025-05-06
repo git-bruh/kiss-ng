@@ -268,10 +268,21 @@ pub const Package = struct {
         var pkg_dir = try kiss_config.get_proc_pkg_dir();
         defer pkg_dir.close();
 
-        return try self.execBuildScript(build_dir, pkg_dir);
+        var log_dir = try config.Config.get_log_dir();
+        defer log_dir.close();
+
+        var log_file = try config.Config.get_proc_log_file(log_dir, self.name);
+        defer {
+            log_file.close();
+            kiss_config.rm_proc_log_file(log_dir, self.name) catch |err| {
+                std.log.err("failed to clean log file: {}", .{err});
+            };
+        }
+
+        return try self.execBuildScript(build_dir, pkg_dir, log_file);
     }
 
-    fn execBuildScript(self: *const Package, build_dir: std.fs.Dir, pkg_dir: std.fs.Dir) !bool {
+    fn execBuildScript(self: *const Package, build_dir: std.fs.Dir, pkg_dir: std.fs.Dir, log_file: std.fs.File) !bool {
         var env_map = try std.process.getEnvMap(self.allocator);
         defer env_map.deinit();
 
@@ -313,10 +324,11 @@ pub const Package = struct {
 
         var stdoutWriter = std.io.getStdOut().writer();
         var stderrWriter = std.io.getStdErr().writer();
+        var logWriter = log_file.writer();
 
         while (try poller.poll()) {
-            try fs.copyFifo(poller.fifo(.stdout), &.{&stdoutWriter});
-            try fs.copyFifo(poller.fifo(.stderr), &.{&stderrWriter});
+            try fs.copyFifo(poller.fifo(.stdout), &.{ &stdoutWriter, &logWriter });
+            try fs.copyFifo(poller.fifo(.stderr), &.{ &stderrWriter, &logWriter });
         }
 
         const term = try child.wait();

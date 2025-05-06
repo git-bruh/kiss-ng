@@ -79,7 +79,7 @@ pub const Config = struct {
         return try std.fs.openDirAbsolute(CACHE_PATH ++ "/bin", .{});
     }
 
-    pub fn get_logs_dir() !std.fs.Dir {
+    pub fn get_log_dir() !std.fs.Dir {
         const epoch = std.time.epoch.EpochSeconds{
             .secs = @intCast(std.time.timestamp()),
         };
@@ -87,15 +87,29 @@ pub const Config = struct {
         const year_day = epoch_day.calculateYearDay();
         const month_day = year_day.calculateMonthDay();
 
-        const buf: ["YYYY-MM-DD".len]u8 = undefined;
-        try std.fmt.bufPrint(&buf, "{d}-{d:02}-{d:02}", .{ year_day.year, month_day.month.numeric(), month_day.day_index });
+        var buf: ["YYYY-MM-DD".len]u8 = undefined;
+        const path = try std.fmt.bufPrint(&buf, "{d}-{d:02}-{d:02}", .{ year_day.year, month_day.month.numeric(), month_day.day_index });
 
         try fs.ensureDir(std.fs.makeDirAbsolute(CACHE_PATH ++ "/logs"));
-        const cache_dir = try std.fs.openDirAbsolute(CACHE_PATH ++ "/logs", .{});
+        var cache_dir = try std.fs.openDirAbsolute(CACHE_PATH ++ "/logs", .{});
         defer cache_dir.close();
 
-        try fs.ensureDir(cache_dir.makeDir(buf));
-        return try cache_dir.openDir(buf, .{});
+        try fs.ensureDir(cache_dir.makeDir(path));
+        return try cache_dir.openDir(path, .{});
+    }
+
+    pub fn get_proc_log_file(log_dir: std.fs.Dir, pkg_name: []const u8) !std.fs.File {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = try std.fmt.bufPrint(&buf, "{s}-{d}", .{ pkg_name, std.os.linux.getpid() });
+        return try log_dir.createFile(path, .{});
+    }
+
+    pub fn rm_proc_log_file(self: *const Config, log_dir: std.fs.Dir, pkg_name: []const u8) !void {
+        if (!self.debug) {
+            var buf: [std.fs.max_path_bytes]u8 = undefined;
+            const path = try std.fmt.bufPrint(&buf, "{s}-{d}", .{ pkg_name, std.os.linux.getpid() });
+            return try log_dir.deleteFile(path);
+        }
     }
 
     pub fn get_proc_build_dir(self: *const Config) !std.fs.Dir {
