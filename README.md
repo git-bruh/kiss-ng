@@ -44,4 +44,4 @@ Next generation of the [KISS](https://codeberg.org/kiss-community/kiss) package 
   - [ ] `KISS_HOOK`
   - [ ] `KISS_KEEPLOG`
   - [ ] `KISS_PROMPT`
-  - [ ] `KISS_TMPDIR`
+  - [x] `KISS_TMPDIR`

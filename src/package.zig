@@ -211,9 +211,14 @@ pub const Package = struct {
         return true;
     }
 
-    pub fn build(self: *const Package, kiss_config: *const config.Config) !void {
-        var build_dir = try kiss_config.get_build_dir(self.name);
-        defer build_dir.close();
+    pub fn build(self: *const Package, kiss_config: *const config.Config) !bool {
+        var build_dir = try kiss_config.get_proc_build_dir();
+        defer {
+            build_dir.close();
+            kiss_config.rm_proc_dir() catch |err| {
+                std.log.err("failed to clean build directory: {}", .{err});
+            };
+        }
 
         for (self.sources.items) |source| switch (source) {
             .Git => |git| {
@@ -259,6 +264,72 @@ pub const Package = struct {
                 try self.dir.copyFile(local.path, sub_build_dir orelse build_dir, std.fs.path.basename(local.path), .{});
             },
         };
+
+        var pkg_dir = try kiss_config.get_proc_pkg_dir();
+        defer pkg_dir.close();
+
+        return try self.execBuildScript(build_dir, pkg_dir);
+    }
+
+    fn execBuildScript(self: *const Package, build_dir: std.fs.Dir, pkg_dir: std.fs.Dir) !bool {
+        var env_map = try std.process.getEnvMap(self.allocator);
+        defer env_map.deinit();
+
+        var outBuf: [std.fs.max_path_bytes]u8 = undefined;
+        const build_path = try fs.readLink(build_dir.fd, &outBuf);
+
+        var tmpBuf: [std.fs.max_path_bytes]u8 = undefined;
+
+        // default values for toolchain variables
+        if (env_map.get("AR") == null) try env_map.put("AR", "ar");
+        if (env_map.get("CC") == null) try env_map.put("CC", "cc");
+        if (env_map.get("CXX") == null) try env_map.put("CXX", "c++");
+        if (env_map.get("NM") == null) try env_map.put("NM", "nm");
+        if (env_map.get("RANLIB") == null) try env_map.put("RANLIB", "ranlib");
+
+        // language-specific flags for sane defaults
+        try env_map.put("GOFLAGS", "-trimpath -modcacherw");
+        try env_map.put("GOPATH", try std.fmt.bufPrint(&tmpBuf, "{s}/go", .{build_path}));
+        try env_map.put("RUSTFLAGS", try std.fmt.bufPrint(&tmpBuf, "--remap-path-prefix={s}=.", .{build_path}));
+
+        const repo_path = try fs.readLink(self.dir.fd, &outBuf);
+        const build_file_path = try std.fmt.bufPrint(&tmpBuf, "{s}/build", .{repo_path});
+        const pkg_path = try fs.readLink(pkg_dir.fd, &outBuf);
+
+        var child = std.process.Child.init(&.{ build_file_path, pkg_path, self.version }, self.allocator);
+
+        child.env_map = &env_map;
+        child.cwd_dir = build_dir;
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Pipe;
+
+        try child.spawn();
+
+        var poller = std.io.poll(self.allocator, enum { stdout, stderr }, .{
+            .stdout = child.stdout.?,
+            .stderr = child.stderr.?,
+        });
+        defer poller.deinit();
+
+        var stdoutWriter = std.io.getStdOut().writer();
+        var stderrWriter = std.io.getStdErr().writer();
+
+        while (try poller.poll()) {
+            try fs.copyFifo(poller.fifo(.stdout), &.{&stdoutWriter});
+            try fs.copyFifo(poller.fifo(.stderr), &.{&stderrWriter});
+        }
+
+        const term = try child.wait();
+        if (term != .Exited) {
+            @panic("process didn't terminate as expected");
+        }
+
+        if (term.Exited != 0) {
+            std.log.err("build failed with status {d}", .{term.Exited});
+            return false;
+        }
+
+        return true;
     }
 
     pub fn install(self: *const Package) !void {

@@ -80,10 +80,15 @@ pub fn extract(dir: std.fs.Dir, file: std.fs.File) !void {
         // without creating sub-directories
         if (strip_components(libarchive.archive_entry_pathname(entry))) |path| {
             libarchive.archive_entry_copy_pathname(entry, path);
+        } else {
+            continue;
         }
+
         if (libarchive.archive_entry_hardlink(entry)) |hardlink| {
             if (strip_components(hardlink)) |path| {
                 libarchive.archive_entry_copy_hardlink(entry, path);
+            } else {
+                continue;
             }
         }
 

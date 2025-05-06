@@ -98,11 +98,29 @@ pub const Config = struct {
         return try cache_dir.openDir(buf, .{});
     }
 
-    pub fn get_build_dir(self: *const Config, pkg_name: []const u8) !std.fs.Dir {
+    pub fn get_proc_build_dir(self: *const Config) !std.fs.Dir {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const path = try std.fmt.bufPrint(&buf, "{s}/{d}/{s}", .{ self.tmpdir orelse (CACHE_PATH ++ "/proc"), std.os.linux.getpid(), pkg_name });
+        const path = try std.fmt.bufPrint(&buf, "{s}/{d}/build", .{ self.tmpdir orelse (CACHE_PATH ++ "/proc"), std.os.linux.getpid() });
 
         return try fs.mkdirParents(null, path);
+    }
+
+    pub fn get_proc_pkg_dir(self: *const Config) !std.fs.Dir {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = try std.fmt.bufPrint(&buf, "{s}/{d}/pkg", .{ self.tmpdir orelse (CACHE_PATH ++ "/proc"), std.os.linux.getpid() });
+
+        return try fs.mkdirParents(null, path);
+    }
+
+    // cleans build & package directories
+    pub fn rm_proc_dir(self: *const Config) !void {
+        if (!self.debug) {
+            var dir = try std.fs.openDirAbsolute(self.tmpdir orelse (CACHE_PATH ++ "/proc"), .{});
+            defer dir.close();
+
+            var buf: [std.fs.max_path_bytes]u8 = undefined;
+            try dir.deleteTree(try std.fmt.bufPrint(&buf, "{d}", .{std.os.linux.getpid()}));
+        }
     }
 
     pub fn get_installed_dir(self: *const Config) !std.fs.Dir {

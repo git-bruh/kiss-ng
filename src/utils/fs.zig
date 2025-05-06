@@ -48,3 +48,21 @@ pub fn copyDir(src_dir: std.fs.Dir, target_dir: std.fs.Dir) !void {
         }
     }
 }
+
+pub fn readLink(fd: std.c.fd_t, outBuf: *[std.fs.max_path_bytes]u8) ![]const u8 {
+    var inBuf: [std.fs.max_path_bytes]u8 = undefined;
+    return try std.fs.readLinkAbsolute(
+        try std.fmt.bufPrint(&inBuf, "/proc/self/fd/{d}", .{fd}),
+        outBuf,
+    );
+}
+
+pub fn copyFifo(fifo: *std.io.PollFifo, writers: []const *std.fs.File.Writer) !void {
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        const n = fifo.read(&buf);
+        if (n == 0) break;
+
+        for (writers) |writer| try writer.writeAll(buf[0..n]);
+    }
+}
