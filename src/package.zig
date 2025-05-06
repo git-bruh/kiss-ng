@@ -279,7 +279,19 @@ pub const Package = struct {
             };
         }
 
-        return try self.execBuildScript(build_dir, pkg_dir, log_file);
+        if (!try self.execBuildScript(build_dir, pkg_dir, log_file)) return false;
+
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const pkg_db_path = try std.fmt.bufPrint(&buf, "{s}/{s}", .{ config.DB_PATH_INSTALLED, self.name });
+
+        // re-open here as iteration permission is not guaranteed
+        var repo_dir = try self.dir.openDir(".", .{ .iterate = true });
+        defer repo_dir.close();
+        var installed_db_dir = try fs.mkdirParents(pkg_dir, pkg_db_path);
+        defer installed_db_dir.close();
+        try fs.copyDir(repo_dir, installed_db_dir);
+
+        return true;
     }
 
     fn execBuildScript(self: *const Package, build_dir: std.fs.Dir, pkg_dir: std.fs.Dir, log_file: std.fs.File) !bool {
