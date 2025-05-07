@@ -13,7 +13,7 @@ pub fn mkdirParents(dir: ?std.fs.Dir, path: []const u8) !std.fs.Dir {
         if (std.mem.eql(u8, sub_path, "")) continue;
         errdefer prev_dir.close();
         try ensureDir(prev_dir.makeDir(sub_path));
-        const new_dir = try prev_dir.openDir(sub_path, .{});
+        const new_dir = try prev_dir.openDir(sub_path, .{ .iterate = true });
         prev_dir.close();
         prev_dir = new_dir;
     }

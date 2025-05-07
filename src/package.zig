@@ -121,6 +121,11 @@ pub const Package = struct {
         self.implicit = true;
     }
 
+    pub fn version_without_release(self: *const Package) ![]const u8 {
+        const idx = std.mem.lastIndexOfScalar(u8, self.version, '-') orelse return error.InvalidArgument;
+        return self.version[0..idx];
+    }
+
     pub fn download_and_verify(self: *const Package, generate_checksum: bool) !bool {
         const checksums = if (generate_checksum) try self.dir.createFile("checksums", .{}) else null;
         defer if (checksums) |f| f.close();
@@ -272,14 +277,14 @@ pub const Package = struct {
         defer log_dir.close();
 
         var log_file = try config.Config.get_proc_log_file(log_dir, self.name);
-        defer {
-            log_file.close();
-            kiss_config.rm_proc_log_file(log_dir, self.name) catch |err| {
-                std.log.err("failed to clean log file: {}", .{err});
-            };
-        }
+        defer log_file.close();
 
         if (!try self.execBuildScript(build_dir, pkg_dir, log_file)) return false;
+
+        // only delete log file on successful build
+        kiss_config.rm_proc_log_file(log_dir, self.name) catch |err| {
+            std.log.err("failed to clean log file: {}", .{err});
+        };
 
         var buf: [std.fs.max_path_bytes]u8 = undefined;
         const pkg_db_path = try std.fmt.bufPrint(&buf, "{s}/{s}", .{ config.DB_PATH_INSTALLED, self.name });
@@ -290,6 +295,20 @@ pub const Package = struct {
         var installed_db_dir = try fs.mkdirParents(pkg_dir, pkg_db_path);
         defer installed_db_dir.close();
         try fs.copyDir(repo_dir, installed_db_dir);
+
+        // try self.strip(nostrip);
+        // try self.fix_deps();
+        var manifest_file = try installed_db_dir.createFile("manifest", .{});
+        defer manifest_file.close();
+
+        if (pkg_dir.access("etc", .{}) != error.FileNotFound) {}
+
+        var etcsums_file = if (pkg_dir.access("etc", .{})) try installed_db_dir.createFile("etcsums", .{}) else |err| blk: {
+            if (err == error.FileNotFound) break :blk null;
+            return err;
+        };
+        defer if (etcsums_file != null) etcsums_file.?.close();
+        try Package.generateManifestEtcsums(pkg_dir, null, manifest_file.writer(), if (etcsums_file != null) etcsums_file.?.writer() else null);
 
         return true;
     }
@@ -319,7 +338,7 @@ pub const Package = struct {
         const build_file_path = try std.fmt.bufPrint(&tmpBuf, "{s}/build", .{repo_path});
         const pkg_path = try fs.readLink(pkg_dir.fd, &outBuf);
 
-        var child = std.process.Child.init(&.{ build_file_path, pkg_path, self.version }, self.allocator);
+        var child = std.process.Child.init(&.{ build_file_path, pkg_path, try self.version_without_release() }, self.allocator);
 
         child.env_map = &env_map;
         child.cwd_dir = build_dir;
@@ -354,6 +373,46 @@ pub const Package = struct {
         }
 
         return true;
+    }
+
+    fn generateManifestEtcsums(dir: std.fs.Dir, skip_path_bytes: ?usize, manifest_writer: std.fs.File.Writer, etcsums_writer: ?std.fs.File.Writer) !void {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var dir_name = try fs.readLink(dir.fd, &buf);
+        // skip bytes from the parent directory as we only want paths relative to /
+        if (skip_path_bytes) |n| dir_name = dir_name[n..dir_name.len];
+
+        // iterate over all directories first so that we can internally recurse
+        // to the leaves, ensuring that we list out all file names before directories
+        var it = dir.iterate();
+        while (try it.next()) |entry| {
+            if (entry.kind == .directory) {
+                var sub_dir = try dir.openDir(entry.name, .{ .iterate = true });
+                defer sub_dir.close();
+                try Package.generateManifestEtcsums(sub_dir, skip_path_bytes orelse dir_name.len, manifest_writer, etcsums_writer);
+            }
+        }
+
+        it = dir.iterate();
+        while (try it.next()) |entry| {
+            if (entry.kind != .directory) {
+                // we must not install libtool / charset.alias files
+                if (std.mem.eql(u8, entry.name, "charset.alias") or
+                    std.mem.endsWith(u8, entry.name, ".la")) continue;
+
+                try manifest_writer.print("{s}/{s}\n", .{ dir_name, entry.name });
+
+                if (!std.mem.startsWith(u8, dir_name, "/etc")) continue;
+
+                var b3sum: checksum.CHECKSUM = undefined;
+                var file = if (entry.kind == .file) try dir.openFile(entry.name, .{}) else try std.fs.openFileAbsolute("/dev/null", .{});
+                defer file.close();
+                try checksum.b3sum(file, &b3sum);
+                std.log.info("generated etcsums {ks} for {ks}{ks}{ks}", .{ b3sum, dir_name, "/", entry.name });
+                try etcsums_writer.?.print("{s}\n", .{b3sum});
+            }
+        }
+
+        try manifest_writer.print("{s}/\n", .{dir_name});
     }
 
     pub fn install(self: *const Package) !void {
