@@ -6,7 +6,7 @@ Next generation of the [KISS](https://codeberg.org/kiss-community/kiss) package 
 
 - [ ] alternatives
 
-- [ ] build
+- [x] build
   - [ ] run as unprivileged user
   - [ ] sandboxed builds using [`landlock`](https://landlock.io)
 
@@ -36,10 +36,10 @@ Next generation of the [KISS](https://codeberg.org/kiss-community/kiss) package 
 
 - [ ] environment variables
   - [x] `KISS_ROOT`
-  - [ ] `KISS_COMPRESS`
+  - ~~[ ] `KISS_COMPRESS`~~
   - [x] `KISS_PATH`
   - [ ] `KISS_COLOR`
-  - [ ] `KISS_DEBUG`
+  - [x] `KISS_DEBUG`
   - [ ] `KISS_FORCE`
   - [ ] `KISS_HOOK`
   - [ ] `KISS_KEEPLOG`

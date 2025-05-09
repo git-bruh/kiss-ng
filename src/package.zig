@@ -310,6 +310,18 @@ pub const Package = struct {
         defer if (etcsums_file != null) etcsums_file.?.close();
         try Package.generateManifestEtcsums(pkg_dir, null, manifest_file.writer(), if (etcsums_file != null) etcsums_file.?.writer() else null);
 
+        var bin_dir = try config.Config.get_bin_dir();
+        defer bin_dir.close();
+
+        const path = try std.fmt.bufPrint(&buf, ".{s}@{s}.tar.zst", .{ self.name, self.version });
+        var tmp_file = try bin_dir.createFile(path, .{});
+        defer tmp_file.close();
+
+        try archive.compress(pkg_dir, tmp_file);
+
+        bin_dir.deleteFile(path[1..path.len]) catch |err| if (err != error.FileNotFound) return err;
+        try bin_dir.rename(path, path[1..path.len]);
+
         return true;
     }
 
@@ -404,6 +416,7 @@ pub const Package = struct {
                 if (!std.mem.startsWith(u8, dir_name, "/etc")) continue;
 
                 var b3sum: checksum.CHECKSUM = undefined;
+                // ensure we maintain consistent checksums for symlinks
                 var file = if (entry.kind == .file) try dir.openFile(entry.name, .{}) else try std.fs.openFileAbsolute("/dev/null", .{});
                 defer file.close();
                 try checksum.b3sum(file, &b3sum);
