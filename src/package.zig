@@ -5,6 +5,7 @@ const curl_download = @import("utils/download.zig");
 const git_util = @import("utils/git.zig");
 const archive = @import("utils/archive.zig");
 const fs = @import("utils/fs.zig");
+const unistd = @cImport(@cInclude("unistd.h"));
 
 /// A dependency can either be build time (needed just for building the package)
 /// or runtime (needed both at build time and runtime)
@@ -425,11 +426,82 @@ pub const Package = struct {
             }
         }
 
-        try manifest_writer.print("{s}/\n", .{dir_name});
+        // ensure we don't include the root directory itself
+        if (skip_path_bytes != null) try manifest_writer.print("{s}/\n", .{dir_name});
     }
 
     pub fn install(self: *const Package) !void {
+        // TODO lock
+        // verify manifest
+        // verify dependencies installed
+        // run post-install hook
+
         _ = self;
+    }
+
+    pub fn remove(self: *const Package, kiss_config: *const config.Config) !void {
+        var sys_dir = try kiss_config.get_installed_dir();
+        defer sys_dir.close();
+
+        var pkg_dir = try sys_dir.openDir(self.name, .{});
+        defer pkg_dir.close();
+
+        const manifest = try read_until_end(self.allocator, &pkg_dir, "manifest") orelse @panic("installed pkg has no manifest");
+        defer self.allocator.free(manifest);
+
+        var root_dir = try std.fs.openDirAbsolute(kiss_config.root orelse "/", .{});
+        defer root_dir.close();
+
+        // we must queue all directory symlinks for later removal and only
+        // remove them if the symlink is broken to avoid false removals of
+        // symlinks /usr/sbin and /usr/lib64
+        var directory_symlinks = std.ArrayList([]const u8).init(self.allocator);
+        defer directory_symlinks.deinit();
+
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const pre_remove_hook = try config.Config.get_hook_path(self.name, "pre-remove", &buf);
+        chrootAndExecHook(kiss_config.root orelse "/", pre_remove_hook);
+
+        var it = std.mem.splitScalar(u8, manifest, '\n');
+        while (it.next()) |path| {
+            if (path.len <= 1) continue;
+
+            // skip 1 index on path to avoid making it absolute, ensuring
+            // it is relative to KISS_ROOT rather than /
+            const rel_path = path[1..path.len];
+
+            if (std.mem.endsWith(u8, path, "/")) {
+                root_dir.deleteDir(rel_path) catch |err| {
+                    if (err == error.DirNotEmpty) continue;
+                    return err;
+                };
+            } else {
+                const stat = try root_dir.statFile(rel_path);
+                if (stat.kind == .sym_link) {
+                    var dir = root_dir.openDir(rel_path, .{}) catch |err| {
+                        if (err == error.NotDir) {
+                            try root_dir.deleteFile(rel_path);
+                            continue;
+                        }
+                        return err;
+                    };
+                    dir.close();
+                    // if symlink is a directory, deal with it later
+                    try directory_symlinks.append(rel_path);
+                    continue;
+                }
+                try root_dir.deleteFile(rel_path);
+            }
+        }
+
+        for (directory_symlinks.items) |path| {
+            var dir = root_dir.openDir(path, .{}) catch |err| {
+                if (err == error.FileNotFound) continue;
+                return err;
+            };
+            dir.close();
+            try root_dir.deleteFile(path);
+        }
     }
 
     pub fn free(self: *Package) void {
@@ -532,4 +604,36 @@ fn sliceTillWhitespace(contents: []const u8) []const u8 {
 
 fn sliceNameFromUrl(url: []const u8) []const u8 {
     return url[(std.mem.lastIndexOfScalar(u8, url, '/') orelse unreachable) + 1 .. url.len];
+}
+
+fn chrootAndExecHook(root: []const u8, path: []const u8) void {
+    const pid = std.c.fork();
+    const pid_err = std.posix.errno(pid);
+    if (pid_err != .SUCCESS) {
+        std.log.err("failed to fork(): {}", .{pid_err});
+        @panic("fork() failed");
+    }
+
+    if (pid == 0) {
+        const c_root = std.posix.toPosixPath(root) catch @panic("path too long");
+        const chroot_err = std.posix.errno(unistd.chroot(&c_root));
+        if (chroot_err != .SUCCESS) {
+            std.log.err("failed to chroot({s}): {}", .{ root, chroot_err });
+            std.process.exit(1);
+        }
+
+        const c_path = std.posix.toPosixPath(path) catch @panic("path too long");
+        std.log.err("failed to execve({s}): {}", .{ path, std.posix.execveZ(&c_path, undefined, undefined) });
+        std.process.exit(1);
+    } else {
+        var status: u32 = 0;
+        _ = std.os.linux.waitpid(-1, &status, 0);
+        status = (status & 0xff00) >> 8;
+
+        if (status == 0) {
+            std.log.info("successfully executed hook at {ks} in {ks}", .{ path, root });
+        } else {
+            std.log.warn("failed to execute hook at {ks} in {ks}: {d}, continuing", .{ path, root, status });
+        }
+    }
 }

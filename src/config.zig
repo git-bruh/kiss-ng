@@ -33,7 +33,7 @@ pub const Config = struct {
         };
         errdefer if (root != null) allocator.free(root.?);
 
-        const path = try std.fmt.allocPrint(allocator, "{s}:{s}{s}", .{
+        const path = try std.fmt.allocPrint(allocator, "{s}:{s}/{s}", .{
             std.posix.getenv("KISS_PATH") orelse "",
             root orelse "/",
             DB_PATH_INSTALLED,
@@ -142,6 +142,10 @@ pub const Config = struct {
         defer root_dir.close();
 
         return try root_dir.openDir(DB_PATH_INSTALLED, .{ .iterate = true });
+    }
+
+    pub fn get_hook_path(pkg_name: []const u8, hook_name: []const u8, out: *[std.fs.max_path_bytes]u8) ![]const u8 {
+        return std.fmt.bufPrint(out, "/{s}/{s}/{s}", .{ DB_PATH_INSTALLED, pkg_name, hook_name });
     }
 
     pub fn free(self: *Config) void {

@@ -30,9 +30,13 @@ Next generation of the [KISS](https://codeberg.org/kiss-community/kiss) package 
 
 - [x] upgrade
 
-- [ ] hooks
+- [ ] hooks (package-specified only)
+  - [x] pre-remove
+  - [ ] post-install
 
 - [ ] provides system
+
+- [ ] global lock for installation/removal
 
 - [ ] environment variables
   - [x] `KISS_ROOT`

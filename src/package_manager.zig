@@ -28,7 +28,6 @@ pub const PackageManager = struct {
         var it = std.mem.splitScalar(u8, self.kiss_config.path, ':');
         while (it.next()) |path| {
             if (std.mem.eql(u8, path, "")) continue;
-
             var repo_dir = try std.fs.openDirAbsolute(path, .{});
             defer repo_dir.close();
             var dir = repo_dir.openDir(pkg_name, .{}) catch continue;
@@ -321,7 +320,12 @@ pub const PackageManager = struct {
                 _ = preferred;
             },
             .Remove => |remove| {
-                _ = remove;
+                if (remove == null) return true;
+                for (remove.?) |name| {
+                    var package = try self.find_in_path(name);
+                    defer package.free();
+                    try package.remove(&self.kiss_config);
+                }
             },
             .Search => |search| {
                 if (search == null) return true;
