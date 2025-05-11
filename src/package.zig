@@ -172,8 +172,7 @@ pub const Package = struct {
                 defer file.close();
                 std.log.info("found remote file {ks}", .{file_name});
 
-                var b3sum: checksum.CHECKSUM = undefined;
-                try checksum.b3sum(file, &b3sum);
+                const b3sum = try checksum.b3sum(file);
                 if (checksums) |f| {
                     try f.writer().print("{s}\n", .{b3sum});
                 } else {
@@ -196,8 +195,7 @@ pub const Package = struct {
                 defer file.close();
                 std.log.info("found local file {ks}", .{local.path});
 
-                var b3sum: checksum.CHECKSUM = undefined;
-                try checksum.b3sum(file, &b3sum);
+                const b3sum = try checksum.b3sum(file);
                 if (checksums) |f| {
                     try f.writer().print("{s}\n", .{b3sum});
                 } else {
@@ -416,11 +414,10 @@ pub const Package = struct {
 
                 if (!std.mem.startsWith(u8, dir_name, "/etc")) continue;
 
-                var b3sum: checksum.CHECKSUM = undefined;
                 // ensure we maintain consistent checksums for symlinks
                 var file = if (entry.kind == .file) try dir.openFile(entry.name, .{}) else try std.fs.openFileAbsolute("/dev/null", .{});
                 defer file.close();
-                try checksum.b3sum(file, &b3sum);
+                const b3sum = try checksum.b3sum(file);
                 std.log.info("generated etcsums {ks} for {ks}{ks}{ks}", .{ b3sum, dir_name, "/", entry.name });
                 try etcsums_writer.?.print("{s}\n", .{b3sum});
             }

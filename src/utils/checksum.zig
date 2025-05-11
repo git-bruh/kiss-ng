@@ -4,7 +4,9 @@ const blake3 = @cImport(@cInclude("blake3.h"));
 pub const B3SUM_LEN = 33;
 pub const CHECKSUM = [B3SUM_LEN * 2]u8;
 
-pub fn b3sum(file: std.fs.File, out: *[B3SUM_LEN * 2]u8) !void {
+pub fn b3sum(file: std.fs.File) ![B3SUM_LEN * 2]u8 {
+    var out: [B3SUM_LEN * 2]u8 = undefined;
+
     var hasher: blake3.blake3_hasher = undefined;
     blake3.blake3_hasher_init(&hasher);
 
@@ -25,4 +27,6 @@ pub fn b3sum(file: std.fs.File, out: *[B3SUM_LEN * 2]u8) !void {
     for (checksum, 0..) |byte, idx| {
         _ = try std.fmt.bufPrint(out[idx * 2 .. (idx * 2) + 2], "{x:02}", .{byte});
     }
+
+    return out;
 }
