@@ -49,6 +49,47 @@ pub fn copyDir(src_dir: std.fs.Dir, target_dir: std.fs.Dir) !void {
     }
 }
 
+// paths is an iterator which lists directories first and then the sub-paths
+pub fn copyStructure(src_dir: std.fs.Dir, target_dir: std.fs.Dir, paths: anytype) !void {
+    while (paths.next()) |path| {
+        // the caller must verify that the path entries are valid
+        const rel_path = path[1..path.len];
+
+        // ignore directory if it exists in the system, otherwise create one
+        // with the same permissions
+        if (std.mem.endsWith(u8, rel_path, "/")) {
+            target_dir.access(rel_path, .{}) catch |err| {
+                if (err != error.FileNotFound) {
+                    std.log.err("failed to access system path {ks}: {}", .{ path, err });
+                    return err;
+                }
+
+                const stat = try src_dir.statFile(rel_path);
+                try std.posix.mkdirat(target_dir.fd, rel_path, stat.mode);
+            };
+            continue;
+        }
+
+        // try renaming the file if we are on the same filesystem
+        // otherwise do a normal copy
+        std.fs.rename(src_dir, rel_path, target_dir, rel_path) catch |err| {
+            if (err != error.RenameAcrossMountPoints) {
+                return err;
+            }
+
+            const stat = try src_dir.statFile(rel_path);
+            if (stat.kind == .sym_link) {
+                var buf: [std.fs.max_path_bytes]u8 = undefined;
+                const link_path = try src_dir.readLink(rel_path, &buf);
+                try target_dir.symLink(link_path, rel_path, .{});
+                continue;
+            }
+
+            try src_dir.copyFile(rel_path, target_dir, rel_path, .{});
+        };
+    }
+}
+
 pub fn readLink(fd: std.c.fd_t, outBuf: *[std.fs.max_path_bytes]u8) ![]const u8 {
     var inBuf: [std.fs.max_path_bytes]u8 = undefined;
     return try std.fs.readLinkAbsolute(

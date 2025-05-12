@@ -139,7 +139,7 @@ pub const PackageManager = struct {
             std.log.info("successfully built {ks}", .{pkg.name});
             if (pkg.implicit) {
                 std.log.info("{ks} needed as dependency, installing", .{pkg.name});
-                try pkg.install();
+                if (!try pkg.install(&self.kiss_config)) return false;
             }
         }
 
@@ -208,7 +208,7 @@ pub const PackageManager = struct {
             std.log.info("({d}/{d}) building package {ks}", .{ idx + 1, sorted.items.len - 1, pkg.name });
 
             if (!try pkg.build(&self.kiss_config)) return false;
-            try pkg.install();
+            if (!try pkg.install(&self.kiss_config)) return false;
         }
 
         return true;
@@ -285,7 +285,19 @@ pub const PackageManager = struct {
                 }
             },
             .Install => |install| {
-                _ = install;
+                if (install == null) {
+                    var pkg = try types.Package.new_from_cwd(self.allocator);
+                    defer pkg.free();
+
+                    return try pkg.install(&self.kiss_config);
+                }
+
+                for (install.?) |package| {
+                    var pkg = try self.find_in_path(package);
+                    defer pkg.free();
+
+                    if (!try pkg.install(&self.kiss_config)) return false;
+                }
             },
             .List => |list| {
                 var installed_dir = try self.kiss_config.get_installed_dir();
@@ -320,11 +332,16 @@ pub const PackageManager = struct {
                 _ = preferred;
             },
             .Remove => |remove| {
-                if (remove == null) return true;
+                if (remove == null) {
+                    var pkg = try types.Package.new_from_cwd(self.allocator);
+                    defer pkg.free();
+                    return try pkg.remove(&self.kiss_config);
+                }
+
                 for (remove.?) |name| {
                     var package = try self.find_in_path(name);
                     defer package.free();
-                    try package.remove(&self.kiss_config);
+                    if (!try package.remove(&self.kiss_config)) return false;
                 }
             },
             .Search => |search| {

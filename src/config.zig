@@ -79,6 +79,16 @@ pub const Config = struct {
         return try std.fs.openDirAbsolute(CACHE_PATH ++ "/bin", .{});
     }
 
+    // must be used with flock
+    pub fn get_extract_dir() !std.fs.Dir {
+        try fs.ensureDir(std.fs.makeDirAbsolute(CACHE_PATH ++ "/extract"));
+        return try std.fs.openDirAbsolute(CACHE_PATH ++ "/extract", .{});
+    }
+
+    pub fn rm_extract_dir() !void {
+        return try std.fs.deleteTreeAbsolute(CACHE_PATH ++ "/extract");
+    }
+
     pub fn get_log_dir() !std.fs.Dir {
         const epoch = std.time.epoch.EpochSeconds{
             .secs = @intCast(std.time.timestamp()),

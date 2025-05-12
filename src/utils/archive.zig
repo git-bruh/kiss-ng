@@ -26,7 +26,7 @@ fn check(archive: ?*libarchive.struct_archive, res: c_int) ArchiveError!void {
     }
 }
 
-fn strip_components(path: [*c]const u8) ?[*c]const u8 {
+fn strip_path_components(path: [*c]const u8) ?[*c]const u8 {
     const first_slash = blk: {
         var idx: usize = 0;
         while (true) {
@@ -47,7 +47,7 @@ fn strip_components(path: [*c]const u8) ?[*c]const u8 {
     unreachable;
 }
 
-pub fn extract(dir: std.fs.Dir, file: std.fs.File) !void {
+pub fn extract(dir: std.fs.Dir, file: std.fs.File, strip_components: bool) !void {
     var cwd = try std.fs.cwd().openDir(".", .{});
     defer {
         std.posix.fchdir(cwd.fd) catch |err| std.log.err("failed to change to original dir after extract: {}", .{err});
@@ -72,19 +72,21 @@ pub fn extract(dir: std.fs.Dir, file: std.fs.File) !void {
             else => return err,
         };
 
-        // remove components before the first slash to ensure we extract
-        // without creating sub-directories
-        if (strip_components(libarchive.archive_entry_pathname(entry))) |path| {
-            libarchive.archive_entry_copy_pathname(entry, path);
-        } else {
-            continue;
-        }
-
-        if (libarchive.archive_entry_hardlink(entry)) |hardlink| {
-            if (strip_components(hardlink)) |path| {
-                libarchive.archive_entry_copy_hardlink(entry, path);
+        if (strip_components) {
+            // remove components before the first slash to ensure we extract
+            // without creating sub-directories
+            if (strip_path_components(libarchive.archive_entry_pathname(entry))) |path| {
+                libarchive.archive_entry_copy_pathname(entry, path);
             } else {
                 continue;
+            }
+
+            if (libarchive.archive_entry_hardlink(entry)) |hardlink| {
+                if (strip_path_components(hardlink)) |path| {
+                    libarchive.archive_entry_copy_hardlink(entry, path);
+                } else {
+                    continue;
+                }
             }
         }
 

@@ -72,11 +72,12 @@ pub const Package = struct {
     dir: std.fs.Dir,
     allocator: std.mem.Allocator,
 
-    pub fn new(allocator: std.mem.Allocator, dir: *std.fs.Dir) !Package {
+    pub fn new(allocator: std.mem.Allocator, dir_ptr: *std.fs.Dir) !Package {
+        var dir = std.fs.Dir{ .fd = dir_ptr.fd };
         errdefer dir.close();
 
-        var inBuf: [std.fs.max_path_bytes]u8 = @splat(0);
-        var outBuf: [std.fs.max_path_bytes]u8 = @splat(0);
+        var inBuf: [std.fs.max_path_bytes]u8 = undefined;
+        var outBuf: [std.fs.max_path_bytes]u8 = undefined;
         const name = std.fs.path.basename(try std.fs.readLinkAbsolute(
             try std.fmt.bufPrint(&inBuf, "/proc/self/fd/{d}", .{dir.fd}),
             &outBuf,
@@ -116,6 +117,14 @@ pub const Package = struct {
     pub fn new_from_cwd(allocator: std.mem.Allocator) !Package {
         var dir = try std.fs.cwd().openDir(".", .{});
         return try Package.new(allocator, &dir);
+    }
+
+    pub fn new_from_installed_db(allocator: std.mem.Allocator, kiss_config: *config.Config, name: []const u8) !Package {
+        var installed_dir = try kiss_config.get_installed_dir();
+        defer installed_dir.close();
+
+        var pkg_dir = try installed_dir.openDir(name, .{});
+        return try Package.new(allocator, &pkg_dir);
     }
 
     pub fn mark_implicit(self: *Package) void {
@@ -254,7 +263,7 @@ pub const Package = struct {
                 if (archive.is_extractable(file_name)) {
                     var file = try cache_dir.openFile(file_name, .{});
                     defer file.close();
-                    try archive.extract(sub_build_dir orelse build_dir, file);
+                    try archive.extract(sub_build_dir orelse build_dir, file, true);
                 } else {
                     try cache_dir.copyFile(file_name, sub_build_dir orelse build_dir, file_name, .{});
                 }
@@ -427,23 +436,125 @@ pub const Package = struct {
         if (skip_path_bytes != null) try manifest_writer.print("{s}/\n", .{dir_name});
     }
 
-    pub fn install(self: *const Package) !void {
+    pub fn install(self: *const Package, kiss_config: *config.Config) !bool {
         // TODO lock
-        // verify manifest
-        // verify dependencies installed
         // run post-install hook
 
-        _ = self;
-    }
+        var bin_dir = try config.Config.get_bin_dir();
+        defer bin_dir.close();
 
-    pub fn remove(self: *const Package, kiss_config: *const config.Config) !void {
-        var sys_dir = try kiss_config.get_installed_dir();
-        defer sys_dir.close();
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const bin_path = try std.fmt.bufPrint(&buf, "{s}@{s}.tar.zst", .{ self.name, self.version });
 
-        var pkg_dir = try sys_dir.openDir(self.name, .{});
+        var bin_file = try bin_dir.openFile(bin_path, .{});
+        defer bin_file.close();
+
+        var extract_dir = try config.Config.get_extract_dir();
+        defer {
+            extract_dir.close();
+            config.Config.rm_extract_dir() catch |err| {
+                std.log.warn("failed to delete tree for binary package {ks}: {}", .{ bin_path, err });
+            };
+        }
+
+        var system_pkg = Package.new_from_installed_db(self.allocator, kiss_config, self.name) catch |err| blk: {
+            std.log.warn("did not find existing installed package: {}", .{err});
+            break :blk null;
+        };
+        defer if (system_pkg != null) system_pkg.?.free();
+        var system_manifest: ?[]const u8 = null;
+        defer if (system_manifest != null) self.allocator.free(system_manifest.?);
+
+        var installed_files_map = std.StringHashMap(void).init(self.allocator);
+        defer installed_files_map.deinit();
+
+        if (system_pkg != null) {
+            system_manifest = try read_until_end(self.allocator, system_pkg.?.dir, "manifest") orelse {
+                std.log.err("no manifest found for installed package {ks}", .{self.name});
+                return false;
+            };
+            var it = std.mem.splitScalar(u8, sliceTillWhitespace(system_manifest.?), '\n');
+            while (it.next()) |path| try installed_files_map.putNoClobber(path, {});
+        }
+
+        // first extract the binary package as-is and then inspect dependencies
+        // and the manifest file to check for missing dependencies and conflicts
+        std.log.info("extracting {ks}", .{bin_path});
+        try archive.extract(extract_dir, bin_file, false);
+
+        var db_dir = try extract_dir.openDir(config.DB_PATH_INSTALLED, .{});
+        defer db_dir.close();
+
+        var pkg_dir = try db_dir.openDir(self.name, .{});
         defer pkg_dir.close();
 
-        const manifest = try read_until_end(self.allocator, &pkg_dir, "manifest") orelse @panic("installed pkg has no manifest");
+        const depends = try read_until_end(self.allocator, pkg_dir, "depends");
+        defer if (depends != null) self.allocator.free(depends.?);
+
+        const dependencies = try parse_dependencies(self.allocator, sliceTillWhitespace(depends orelse ""));
+        defer dependencies.deinit();
+
+        for (dependencies.items) |dependency| {
+            if (dependency.kind == .Build) continue;
+            // TODO verify dependency installed
+        }
+
+        const manifest = try read_until_end(self.allocator, pkg_dir, "manifest") orelse {
+            std.log.err("no manifest found in binary package {ks}", .{bin_path});
+            return false;
+        };
+        defer self.allocator.free(manifest);
+
+        std.log.info("checking for conflicts", .{});
+
+        var root_dir = try std.fs.openDirAbsolute(kiss_config.root orelse "/", .{});
+        defer root_dir.close();
+
+        var it = std.mem.splitBackwardsScalar(u8, sliceTillWhitespace(manifest), '\n');
+        while (it.next()) |path| {
+            if (path.len < 2) {
+                std.log.err("path too short {ks}", .{path});
+                return false;
+            }
+
+            const rel_path = path[1..path.len];
+
+            // we can't conflict with a previous version of ourselves
+            if (installed_files_map.contains(path)) continue;
+
+            const system_stat = root_dir.statFile(rel_path) catch |err| {
+                if (err == error.FileNotFound) continue;
+                std.log.err("failed to stat system path {ks}: {}", .{ path, err });
+                return false;
+            };
+            const stat = try extract_dir.statFile(rel_path);
+
+            const either_dir = system_stat.kind == .directory or stat.kind == .directory;
+            const both_dir = system_stat.kind == .directory and stat.kind == .directory;
+
+            if (either_dir) {
+                if (!both_dir) {
+                    std.log.err("unresolvable conflict at path {ks}, system kind: {}, package kind: {}", .{ path, system_stat.kind, stat.kind });
+                    return false;
+                }
+                // if the directory already exists, ignore it
+                continue;
+            }
+
+            // TODO create alternative
+            std.log.err("path {ks} exists both in system and in package", .{path});
+            return false;
+        }
+
+        it.reset();
+        try fs.copyStructure(extract_dir, root_dir, &it);
+
+        return true;
+    }
+
+    pub fn remove(self: *const Package, kiss_config: *const config.Config) !bool {
+        // TODO verify that no other package depends on this
+        const manifest = try read_until_end(self.allocator, self.dir, "manifest") orelse @panic("installed pkg has no manifest");
         defer self.allocator.free(manifest);
 
         var root_dir = try std.fs.openDirAbsolute(kiss_config.root orelse "/", .{});
@@ -499,6 +610,8 @@ pub const Package = struct {
             dir.close();
             try root_dir.deleteFile(path);
         }
+
+        return true;
     }
 
     pub fn free(self: *Package) void {
@@ -578,7 +691,7 @@ fn parse_dependencies(allocator: std.mem.Allocator, depends: []const u8) !std.Ar
     return dependencies;
 }
 
-fn read_until_end(allocator: std.mem.Allocator, dir: *std.fs.Dir, name: []const u8) !?[]u8 {
+fn read_until_end(allocator: std.mem.Allocator, dir: std.fs.Dir, name: []const u8) !?[]u8 {
     const file = dir.openFile(name, .{}) catch |err| switch (err) {
         error.FileNotFound => return null,
         else => return err,
