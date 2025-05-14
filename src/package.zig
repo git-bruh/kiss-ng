@@ -546,6 +546,11 @@ pub const Package = struct {
             return false;
         }
 
+        if (system_pkg != null) {
+            std.log.info("removing system package", .{});
+            if (!try system_pkg.?.remove(kiss_config)) return false;
+        }
+
         it.reset();
         try fs.copyStructure(extract_dir, root_dir, &it);
 

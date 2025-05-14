@@ -4,6 +4,7 @@ const types = @import("package.zig");
 const commands = @import("commands.zig");
 const dag = @import("dag_zig");
 const git = @import("utils/git.zig");
+const fs = @import("utils/fs.zig");
 
 const PackageFindError = error{
     PackageNotFound,
@@ -333,13 +334,15 @@ pub const PackageManager = struct {
             },
             .Remove => |remove| {
                 if (remove == null) {
-                    var pkg = try types.Package.new_from_cwd(self.allocator);
+                    var buf: [std.fs.max_path_bytes]u8 = undefined;
+                    const name = std.fs.path.basename(try fs.readLink(std.fs.cwd().fd, &buf));
+                    var pkg = try types.Package.new_from_installed_db(self.allocator, &self.kiss_config, name);
                     defer pkg.free();
                     return try pkg.remove(&self.kiss_config);
                 }
 
                 for (remove.?) |name| {
-                    var package = try self.find_in_path(name);
+                    var package = try types.Package.new_from_installed_db(self.allocator, &self.kiss_config, name);
                     defer package.free();
                     if (!try package.remove(&self.kiss_config)) return false;
                 }
