@@ -287,6 +287,12 @@ pub const Package = struct {
         var log_file = try config.Config.get_proc_log_file(log_dir, self.name);
         defer log_file.close();
 
+        // create empty /var/db/kiss/installed in build directory
+        {
+            var dir = try fs.mkdirParents(pkg_dir, config.DB_PATH_INSTALLED);
+            dir.close();
+        }
+
         if (!try self.execBuildScript(build_dir, pkg_dir, log_file)) return false;
 
         // only delete log file on successful build
@@ -438,7 +444,6 @@ pub const Package = struct {
 
     pub fn install(self: *const Package, kiss_config: *config.Config) !bool {
         // TODO lock
-        // run post-install hook
 
         var bin_dir = try config.Config.get_bin_dir();
         defer bin_dir.close();
@@ -488,15 +493,29 @@ pub const Package = struct {
         var pkg_dir = try db_dir.openDir(self.name, .{});
         defer pkg_dir.close();
 
+        var root_dir = try std.fs.openDirAbsolute(kiss_config.root orelse "/", .{});
+        defer root_dir.close();
+
         const depends = try read_until_end(self.allocator, pkg_dir, "depends");
         defer if (depends != null) self.allocator.free(depends.?);
 
         const dependencies = try parse_dependencies(self.allocator, sliceTillWhitespace(depends orelse ""));
         defer dependencies.deinit();
 
-        for (dependencies.items) |dependency| {
-            if (dependency.kind == .Build) continue;
-            // TODO verify dependency installed
+        if (dependencies.items.len > 0) {
+            var installed_pkg_dir = try kiss_config.get_installed_dir();
+            defer installed_pkg_dir.close();
+
+            for (dependencies.items) |dependency| {
+                if (dependency.kind == .Build) continue;
+                installed_pkg_dir.access(dependency.name, .{}) catch |err| {
+                    if (err == error.FileNotFound) {
+                        std.log.err("dependency {ks} missing", .{dependency.name});
+                        return false;
+                    }
+                    return err;
+                };
+            }
         }
 
         const manifest = try read_until_end(self.allocator, pkg_dir, "manifest") orelse {
@@ -506,9 +525,6 @@ pub const Package = struct {
         defer self.allocator.free(manifest);
 
         std.log.info("checking for conflicts", .{});
-
-        var root_dir = try std.fs.openDirAbsolute(kiss_config.root orelse "/", .{});
-        defer root_dir.close();
 
         var it = std.mem.splitBackwardsScalar(u8, sliceTillWhitespace(manifest), '\n');
         while (it.next()) |path| {
@@ -554,11 +570,36 @@ pub const Package = struct {
         it.reset();
         try fs.copyStructure(extract_dir, root_dir, &it);
 
+        const post_install_hook = try config.Config.get_hook_path(self.name, "post-install", &buf);
+        chrootAndExecHook(kiss_config.root orelse "/", post_install_hook);
+
         return true;
     }
 
     pub fn remove(self: *const Package, kiss_config: *const config.Config) !bool {
-        // TODO verify that no other package depends on this
+        var installed_pkg_dir = try kiss_config.get_installed_dir();
+        defer installed_pkg_dir.close();
+
+        var deps_it = installed_pkg_dir.iterate();
+        while (try deps_it.next()) |entry| {
+            var pkg_dir = try installed_pkg_dir.openDir(entry.name, .{});
+            defer pkg_dir.close();
+
+            const depends = try read_until_end(self.allocator, pkg_dir, "depends") orelse continue;
+            defer self.allocator.free(depends);
+
+            const dependencies = try parse_dependencies(self.allocator, sliceTillWhitespace(depends));
+            defer dependencies.deinit();
+
+            for (dependencies.items) |dependency| {
+                if (dependency.kind == .Build) continue;
+                if (std.mem.eql(u8, dependency.name, self.name)) {
+                    std.log.err("package {ks} is dependent on {ks}", .{ entry.name, self.name });
+                    return false;
+                }
+            }
+        }
+
         const manifest = try read_until_end(self.allocator, self.dir, "manifest") orelse @panic("installed pkg has no manifest");
         defer self.allocator.free(manifest);
 
