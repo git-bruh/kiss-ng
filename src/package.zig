@@ -425,7 +425,9 @@ pub const Package = struct {
                 if (std.mem.eql(u8, entry.name, "charset.alias") or
                     std.mem.endsWith(u8, entry.name, ".la")) continue;
 
-                try manifest_writer.print("{s}/{s}\n", .{ dir_name, entry.name });
+                // in-case of the root directory skip printing the
+                // directory name altogether
+                if (skip_path_bytes != null) try manifest_writer.print("{s}/{s}\n", .{ dir_name, entry.name }) else try manifest_writer.print("/{s}\n", .{entry.name});
 
                 if (!std.mem.startsWith(u8, dir_name, "/etc")) continue;
 
@@ -630,14 +632,15 @@ pub const Package = struct {
                     return err;
                 };
             } else {
-                const stat = try root_dir.statFile(rel_path);
-                if (stat.kind == .sym_link) {
+                const stat = try std.posix.fstatat(root_dir.fd, rel_path, std.c.AT.SYMLINK_NOFOLLOW);
+                if ((stat.mode & std.c.S.IFMT) == std.c.S.IFLNK) {
                     var dir = root_dir.openDir(rel_path, .{}) catch |err| {
-                        if (err == error.NotDir) {
+                        if (err == error.NotDir or err == error.FileNotFound) {
                             try root_dir.deleteFile(rel_path);
                             continue;
                         }
-                        return err;
+                        std.log.err("failed to openDir({s}): {}", .{ rel_path, err });
+                        return false;
                     };
                     dir.close();
                     // if symlink is a directory, deal with it later
@@ -648,13 +651,16 @@ pub const Package = struct {
             }
         }
 
+        // only remove broken directory symlinks
         for (directory_symlinks.items) |path| {
             var dir = root_dir.openDir(path, .{}) catch |err| {
-                if (err == error.FileNotFound) continue;
+                if (err == error.FileNotFound) {
+                    try root_dir.deleteFile(path);
+                    continue;
+                }
                 return err;
             };
             dir.close();
-            try root_dir.deleteFile(path);
         }
 
         return true;

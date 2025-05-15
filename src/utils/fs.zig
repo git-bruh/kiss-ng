@@ -70,19 +70,20 @@ pub fn copyStructure(src_dir: std.fs.Dir, target_dir: std.fs.Dir, paths: anytype
             continue;
         }
 
+        // we can't copy symlinks
+        const stat = try std.posix.fstatat(src_dir.fd, rel_path, std.c.AT.SYMLINK_NOFOLLOW);
+        if ((stat.mode & std.c.S.IFMT) == std.c.S.IFLNK) {
+            var buf: [std.fs.max_path_bytes]u8 = undefined;
+            const link_path = try src_dir.readLink(rel_path, &buf);
+            try target_dir.symLink(link_path, rel_path, .{});
+            continue;
+        }
+
         // try renaming the file if we are on the same filesystem
         // otherwise do a normal copy
         std.fs.rename(src_dir, rel_path, target_dir, rel_path) catch |err| {
             if (err != error.RenameAcrossMountPoints) {
                 return err;
-            }
-
-            const stat = try src_dir.statFile(rel_path);
-            if (stat.kind == .sym_link) {
-                var buf: [std.fs.max_path_bytes]u8 = undefined;
-                const link_path = try src_dir.readLink(rel_path, &buf);
-                try target_dir.symLink(link_path, rel_path, .{});
-                continue;
             }
 
             try src_dir.copyFile(rel_path, target_dir, rel_path, .{});
