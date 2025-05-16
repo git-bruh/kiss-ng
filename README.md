@@ -22,7 +22,7 @@ Next generation of the [KISS](https://codeberg.org/kiss-community/kiss) package 
 
 - [x] list
 
-- [ ] remove
+- [x] remove
 
 - [x] search
 
@@ -30,9 +30,9 @@ Next generation of the [KISS](https://codeberg.org/kiss-community/kiss) package 
 
 - [x] upgrade
 
-- [ ] hooks (package-specified only)
+- [x] hooks (package-specified only, no user hooks)
   - [x] pre-remove
-  - [ ] post-install
+  - [x] post-install
 
 - [ ] provides system
 
@@ -40,12 +40,12 @@ Next generation of the [KISS](https://codeberg.org/kiss-community/kiss) package 
 
 - [ ] environment variables
   - [x] `KISS_ROOT`
-  - ~~[ ] `KISS_COMPRESS`~~
+  - ~~[ ] `KISS_COMPRESS`~~ `zstd` compression by default
   - [x] `KISS_PATH`
   - [ ] `KISS_COLOR`
   - [x] `KISS_DEBUG`
   - [ ] `KISS_FORCE`
-  - [ ] `KISS_HOOK`
+  - ~~[ ] `KISS_HOOK`~~ not planned
   - [ ] `KISS_KEEPLOG`
   - [ ] `KISS_PROMPT`
   - [x] `KISS_TMPDIR`
