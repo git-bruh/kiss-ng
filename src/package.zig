@@ -628,7 +628,11 @@ pub const Package = struct {
 
             if (std.mem.endsWith(u8, path, "/")) {
                 root_dir.deleteDir(rel_path) catch |err| {
-                    if (err == error.DirNotEmpty) continue;
+                    // directory can either have more contents or it might've
+                    // been deleted as part of the removal process for another
+                    // package because there is no exclusivity of directory
+                    // ownership
+                    if (err == error.DirNotEmpty or err == error.FileNotFound) continue;
                     return err;
                 };
             } else {
