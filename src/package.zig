@@ -656,6 +656,14 @@ pub const Package = struct {
             var dir = root_dir.openDir(path, .{}) catch |err| {
                 if (err == error.FileNotFound) {
                     try root_dir.deleteFile(path);
+                    // try deleting the parent directory as-well if this was
+                    // the last file in the directory
+                    const parent_dir_end = std.mem.lastIndexOfScalar(u8, path, '/') orelse unreachable;
+                    root_dir.deleteDir(path[0..parent_dir_end]) catch |dir_err| {
+                        if (dir_err == error.DirNotEmpty) continue;
+                        return dir_err;
+                    };
+
                     continue;
                 }
                 return err;
