@@ -25,6 +25,16 @@ pub const Config = struct {
     /// KISS_STRIP
     /// whether to strip symbols before packaging
     strip: bool,
+    /// KISS_PROMPT
+    /// whether to prompt for upgrades/implicit dependencies
+    prompt: bool,
+    /// KISS_KEEPLOG
+    /// whether to preserve log files for successful builds
+    keeplog: bool,
+    /// KISS_FORCE
+    /// whether to force operations like installation/removal by skipping
+    /// dependency checks
+    force: bool,
 
     pub fn new_from_env(allocator: std.mem.Allocator) !Config {
         const root = std.process.getEnvVarOwned(allocator, "KISS_ROOT") catch |err| switch (err) {
@@ -48,6 +58,9 @@ pub const Config = struct {
 
         const debug = std.posix.getenv("KISS_DEBUG");
         const strip = std.posix.getenv("KISS_STRIP");
+        const prompt = std.posix.getenv("KISS_PROMPT");
+        const keeplog = std.posix.getenv("KISS_KEEPLOG");
+        const force = std.posix.getenv("KISS_FORCE");
 
         return Config{
             .allocator = allocator,
@@ -58,6 +71,12 @@ pub const Config = struct {
             .debug = (debug != null and debug.?[0] == '1'),
             // defaults to true
             .strip = !(strip != null and strip.?[0] == '0'),
+            // defaults to true
+            .prompt = !(prompt != null and prompt.?[0] == '0'),
+            // defaults to false
+            .keeplog = (keeplog != null and keeplog.?[0] == '1'),
+            // defaults to false
+            .force = (force != null and force.?[0] == '1'),
         };
     }
 
@@ -115,7 +134,7 @@ pub const Config = struct {
     }
 
     pub fn rm_proc_log_file(self: *const Config, log_dir: std.fs.Dir, pkg_name: []const u8) !void {
-        if (!self.debug) {
+        if (!self.debug and !self.keeplog) {
             var buf: [std.fs.max_path_bytes]u8 = undefined;
             const path = try std.fmt.bufPrint(&buf, "{s}-{d}", .{ pkg_name, std.os.linux.getpid() });
             return try log_dir.deleteFile(path);

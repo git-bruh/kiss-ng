@@ -25,6 +25,13 @@ pub const PackageManager = struct {
         return .{ .allocator = allocator, .kiss_config = kiss_config };
     }
 
+    fn prompt(self: *PackageManager) !void {
+        if (!self.kiss_config.prompt) return;
+        try std.io.getStdOut().writer().print("Continue? Press Enter to continue or Ctrl+C to abort", .{});
+        var buffer: [1]u8 = undefined;
+        _ = try std.io.getStdIn().readAll(&buffer);
+    }
+
     fn find_in_path(self: *PackageManager, pkg_name: []const u8) !types.Package {
         var it = std.mem.splitScalar(u8, self.kiss_config.path, ':');
         while (it.next()) |path| {
@@ -132,6 +139,18 @@ pub const PackageManager = struct {
         var it = pkg_map.valueIterator();
         while (it.next()) |pkg| if (!try pkg.download_and_verify(false)) return false;
 
+        var requires_implicit_packages = false;
+        for (sorted.items[0 .. sorted.items.len - 1], 0..) |item, idx| {
+            const pkg = pkg_map.get(item) orelse unreachable;
+            if (pkg.implicit) {
+                requires_implicit_packages = true;
+                std.log.info("({d}/{d}) will build package (implicit) {ks}", .{ idx + 1, sorted.items.len - 1, pkg.name });
+            } else {
+                std.log.info("({d}/{d}) will build package (explicit) {ks}", .{ idx + 1, sorted.items.len - 1, pkg.name });
+            }
+        }
+        if (requires_implicit_packages) try self.prompt();
+
         for (sorted.items[0 .. sorted.items.len - 1], 0..) |item, idx| {
             const pkg = pkg_map.get(item) orelse unreachable;
             std.log.info("({d}/{d}) building package {ks}", .{ idx + 1, sorted.items.len - 1, pkg.name });
@@ -182,10 +201,7 @@ pub const PackageManager = struct {
         }
 
         if (candidates.items.len == 0) return true;
-
-        try std.io.getStdOut().writer().print("Continue? Press Enter to continue or Ctrl+C to abort", .{});
-        var buffer: [1]u8 = undefined;
-        _ = try std.io.getStdIn().readAll(&buffer);
+        try self.prompt();
 
         var pkg_dag = dag.DAG([]const u8).init(self.allocator);
         defer pkg_dag.deinit();

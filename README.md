@@ -15,7 +15,7 @@ Next generation of the [KISS](https://codeberg.org/kiss-community/kiss) package 
 - [x] download
   - [ ] parallel downloads
 
-- [ ] install
+- [x] install
   - [ ] dynamic dependency detector
   - [ ] binary stripping
   - [ ] conflicts
@@ -33,19 +33,20 @@ Next generation of the [KISS](https://codeberg.org/kiss-community/kiss) package 
 - [x] hooks (package-specified only, no user hooks)
   - [x] pre-remove
   - [x] post-install
+  - ~~[ ] user hooks~~ not planned
 
 - [ ] provides system
 
 - [ ] global lock for installation/removal
 
-- [ ] environment variables
+- [x] environment variables
   - [x] `KISS_ROOT`
   - ~~[ ] `KISS_COMPRESS`~~ `zstd` compression by default
   - [x] `KISS_PATH`
-  - [ ] `KISS_COLOR`
+  - ~~[ ] `KISS_COLOR`~~ not planned
   - [x] `KISS_DEBUG`
-  - [ ] `KISS_FORCE`
+  - [x] `KISS_FORCE`
   - ~~[ ] `KISS_HOOK`~~ not planned
-  - [ ] `KISS_KEEPLOG`
-  - [ ] `KISS_PROMPT`
+  - [x] `KISS_KEEPLOG`
+  - [x] `KISS_PROMPT`
   - [x] `KISS_TMPDIR`

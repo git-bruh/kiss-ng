@@ -513,7 +513,7 @@ pub const Package = struct {
                 installed_pkg_dir.access(dependency.name, .{}) catch |err| {
                     if (err == error.FileNotFound) {
                         std.log.err("dependency {ks} missing", .{dependency.name});
-                        return false;
+                        if (!kiss_config.force) return false else continue;
                     }
                     return err;
                 };
@@ -597,7 +597,7 @@ pub const Package = struct {
                 if (dependency.kind == .Build) continue;
                 if (std.mem.eql(u8, dependency.name, self.name)) {
                     std.log.err("package {ks} is dependent on {ks}", .{ entry.name, self.name });
-                    return false;
+                    if (!kiss_config.force) return false;
                 }
             }
         }
