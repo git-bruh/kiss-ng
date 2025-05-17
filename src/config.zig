@@ -177,6 +177,20 @@ pub const Config = struct {
         return std.fmt.bufPrint(out, "/{s}/{s}/{s}", .{ DB_PATH_INSTALLED, pkg_name, hook_name });
     }
 
+    // returns whether the lock was alreadty acquired
+    // in the same process
+    pub fn acquire_lock() !std.fs.File {
+        const path = CACHE_PATH ++ "/lock";
+        std.log.info("acquiring lock file at {ks}...", .{path});
+        const lock_file = try std.fs.createFileAbsolute(path, .{ .lock = .exclusive });
+        std.log.info("acquired lock file", .{});
+        return lock_file;
+    }
+
+    pub fn release_lock(file: std.fs.File) void {
+        file.unlock();
+    }
+
     pub fn free(self: *Config) void {
         self.allocator.free(self.path);
         if (self.root != null) self.allocator.free(self.root.?);

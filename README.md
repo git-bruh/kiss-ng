@@ -4,7 +4,7 @@ Next generation of the [KISS](https://codeberg.org/kiss-community/kiss) package 
 
 # TODO
 
-- [ ] alternatives
+- [ ] alternatives & provides system
 
 - [x] build
   - [ ] run as unprivileged user
@@ -35,9 +35,7 @@ Next generation of the [KISS](https://codeberg.org/kiss-community/kiss) package 
   - [x] post-install
   - ~~[ ] user hooks~~ not planned
 
-- [ ] provides system
-
-- [ ] global lock for installation/removal
+- [x] global lock for installation/removal
 
 - [x] environment variables
   - [x] `KISS_ROOT`

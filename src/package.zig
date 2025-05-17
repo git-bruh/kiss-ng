@@ -445,7 +445,8 @@ pub const Package = struct {
     }
 
     pub fn install(self: *const Package, kiss_config: *config.Config) !bool {
-        // TODO lock
+        const lock_file = try config.Config.acquire_lock();
+        defer config.Config.release_lock(lock_file);
 
         var bin_dir = try config.Config.get_bin_dir();
         defer bin_dir.close();
@@ -566,7 +567,7 @@ pub const Package = struct {
 
         if (system_pkg != null) {
             std.log.info("removing system package", .{});
-            if (!try system_pkg.?.remove(kiss_config)) return false;
+            if (!try system_pkg.?.remove_nolock(kiss_config)) return false;
         }
 
         it.reset();
@@ -578,7 +579,9 @@ pub const Package = struct {
         return true;
     }
 
-    pub fn remove(self: *const Package, kiss_config: *const config.Config) !bool {
+    // this is a separate function because it is called during the installation
+    // process where the lock is already acquired
+    pub fn remove_nolock(self: *const Package, kiss_config: *const config.Config) !bool {
         var installed_pkg_dir = try kiss_config.get_installed_dir();
         defer installed_pkg_dir.close();
 
@@ -676,6 +679,12 @@ pub const Package = struct {
         }
 
         return true;
+    }
+
+    pub fn remove(self: *const Package, kiss_config: *const config.Config) !bool {
+        const lock_file = try config.Config.acquire_lock();
+        defer config.Config.release_lock(lock_file);
+        return try self.remove_nolock(kiss_config);
     }
 
     pub fn free(self: *Package) void {
