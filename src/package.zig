@@ -429,7 +429,7 @@ pub const Package = struct {
                 // directory name altogether
                 if (skip_path_bytes != null) try manifest_writer.print("{s}/{s}\n", .{ dir_name, entry.name }) else try manifest_writer.print("/{s}\n", .{entry.name});
 
-                if (!std.mem.startsWith(u8, dir_name, "/etc")) continue;
+                if (!std.mem.startsWith(u8, dir_name, "/etc") or etcsums_writer == null) continue;
 
                 // ensure we maintain consistent checksums for symlinks
                 var file = if (entry.kind == .file) try dir.openFile(entry.name, .{}) else try std.fs.openFileAbsolute("/dev/null", .{});
@@ -521,13 +521,15 @@ pub const Package = struct {
             }
         }
 
-        const manifest = try read_until_end(self.allocator, pkg_dir, "manifest") orelse {
+        var manifest = try read_until_end(self.allocator, pkg_dir, "manifest") orelse {
             std.log.err("no manifest found in binary package {ks}", .{bin_path});
             return false;
         };
         defer self.allocator.free(manifest);
 
         std.log.info("checking for conflicts", .{});
+
+        var regenerate_manifest = false;
 
         var it = std.mem.splitBackwardsScalar(u8, sliceTillWhitespace(manifest), '\n');
         while (it.next()) |path| {
@@ -560,9 +562,34 @@ pub const Package = struct {
                 continue;
             }
 
+            if (std.mem.startsWith(u8, path, "/etc")) {
+                std.log.err("conflicting /etc file at {ks}", .{path});
+                return false;
+            }
+
             // TODO create alternative
-            std.log.err("path {ks} exists both in system and in package", .{path});
-            return false;
+            try fs.ensureDir(extract_dir.makeDir(config.DB_PATH_CHOICES));
+
+            const path_copy = try std.fmt.bufPrint(&buf, "{s}", .{rel_path});
+            std.mem.replaceScalar(u8, path_copy, '/', '>');
+            var choice_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const choice_path = try std.fmt.bufPrint(&choice_buf, "{s}/{s}>{s}", .{ config.DB_PATH_CHOICES, self.name, path_copy });
+            try extract_dir.rename(rel_path, choice_path);
+            regenerate_manifest = true;
+
+            std.log.info("path {ks} exists both in system and in package, renaming to {ks}{ks}", .{ path, "/", choice_path });
+        }
+
+        // re-generate manifest to account for the files we moved around for choices
+        if (regenerate_manifest) {
+            var manifest_file = try pkg_dir.createFile("manifest", .{});
+            defer manifest_file.close();
+
+            try Package.generateManifestEtcsums(extract_dir, null, manifest_file.writer(), null);
+
+            self.allocator.free(manifest);
+            manifest = try read_until_end(self.allocator, pkg_dir, "manifest") orelse unreachable;
+            it = std.mem.splitBackwardsScalar(u8, sliceTillWhitespace(manifest), '\n');
         }
 
         if (system_pkg != null) {

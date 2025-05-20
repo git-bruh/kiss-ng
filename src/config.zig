@@ -3,6 +3,7 @@ const fs = @import("utils/fs.zig");
 
 pub const DB_PATH = "var/db/kiss";
 pub const DB_PATH_INSTALLED = DB_PATH ++ "/installed";
+pub const DB_PATH_CHOICES = DB_PATH ++ "/choices";
 
 pub const CACHE_PATH = "/var/cache/kiss";
 
@@ -101,7 +102,7 @@ pub const Config = struct {
     // must be used with flock
     pub fn get_extract_dir() !std.fs.Dir {
         try fs.ensureDir(std.fs.makeDirAbsolute(CACHE_PATH ++ "/extract"));
-        return try std.fs.openDirAbsolute(CACHE_PATH ++ "/extract", .{});
+        return try std.fs.openDirAbsolute(CACHE_PATH ++ "/extract", .{ .iterate = true });
     }
 
     pub fn rm_extract_dir() !void {
