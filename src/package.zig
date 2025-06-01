@@ -6,6 +6,7 @@ const git_util = @import("utils/git.zig");
 const archive = @import("utils/archive.zig");
 const fs = @import("utils/fs.zig");
 const unistd = @cImport(@cInclude("unistd.h"));
+const elf = @import("utils/elf.zig");
 
 /// A dependency can either be build time (needed just for building the package)
 /// or runtime (needed both at build time and runtime)
@@ -324,6 +325,8 @@ pub const Package = struct {
         defer if (etcsums_file != null) etcsums_file.?.close();
         try Package.generateManifestEtcsums(pkg_dir, null, manifest_file.writer(), if (etcsums_file != null) etcsums_file.?.writer() else null);
 
+        try Package.strip(self.allocator, pkg_dir);
+
         var bin_dir = try config.Config.get_bin_dir();
         defer bin_dir.close();
 
@@ -442,6 +445,16 @@ pub const Package = struct {
 
         // ensure we don't include the root directory itself
         if (skip_path_bytes != null) try manifest_writer.print("{s}/\n", .{dir_name});
+    }
+
+    fn strip(allocator: std.mem.Allocator, dir: std.fs.Dir) !void {
+        var elf_iterator = elf.ElfIterator.new(allocator);
+        defer elf_iterator.free();
+
+        try elf_iterator.walk(dir);
+        const needed_lib_paths = try elf_iterator.finalize();
+
+        _ = needed_lib_paths;
     }
 
     pub fn install(self: *const Package, kiss_config: *config.Config) !bool {
@@ -567,17 +580,15 @@ pub const Package = struct {
                 return false;
             }
 
-            // TODO create alternative
             try fs.ensureDir(extract_dir.makeDir(config.DB_PATH_CHOICES));
 
             const path_copy = try std.fmt.bufPrint(&buf, "{s}", .{rel_path});
             std.mem.replaceScalar(u8, path_copy, '/', '>');
             var choice_buf: [std.fs.max_path_bytes]u8 = undefined;
             const choice_path = try std.fmt.bufPrint(&choice_buf, "{s}/{s}>{s}", .{ config.DB_PATH_CHOICES, self.name, path_copy });
+            std.log.info("path {ks} exists both in system and in package, renaming to {ks}{ks}", .{ path, "/", choice_path });
             try extract_dir.rename(rel_path, choice_path);
             regenerate_manifest = true;
-
-            std.log.info("path {ks} exists both in system and in package, renaming to {ks}{ks}", .{ path, "/", choice_path });
         }
 
         // re-generate manifest to account for the files we moved around for choices
