@@ -296,6 +296,14 @@ pub const Package = struct {
 
         if (!try self.execBuildScript(build_dir, pkg_dir, log_file)) return false;
 
+        const no_strip = blk: {
+            build_dir.access("nostrip", .{}) catch |err| {
+                if (err != error.FileNotFound) return err;
+                break :blk !kiss_config.strip;
+            };
+            break :blk true;
+        };
+
         // only delete log file on successful build
         kiss_config.rm_proc_log_file(log_dir, self.name) catch |err| {
             std.log.err("failed to clean log file: {}", .{err});
@@ -325,7 +333,7 @@ pub const Package = struct {
         defer if (etcsums_file != null) etcsums_file.?.close();
         try Package.generateManifestEtcsums(pkg_dir, null, manifest_file.writer(), if (etcsums_file != null) etcsums_file.?.writer() else null);
 
-        try Package.strip(self.allocator, pkg_dir);
+        if (!no_strip) try Package.strip(self.allocator, pkg_dir);
 
         var bin_dir = try config.Config.get_bin_dir();
         defer bin_dir.close();

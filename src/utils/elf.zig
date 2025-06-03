@@ -45,7 +45,14 @@ pub const ElfIterator = struct {
         var file = try std.fs.openFileAbsolute(file_name, .{});
         defer file.close();
 
-        const header = try std.elf.Header.read(file);
+        // TODO this seems to break for .a files
+        const header = std.elf.Header.read(file) catch |err| switch (err) {
+            error.InvalidElfMagic => return,
+            error.EndOfStream => return,
+            else => return err,
+        };
+
+        std.log.info("inspecting ELF {ks} of type {}", .{ file_name, header.type });
 
         switch (header.type) {
             // object files (.o), static libraries (.a)
@@ -205,20 +212,25 @@ pub const ElfIterator = struct {
 
         const args: []const []const u8 = &.{ "strip", "-g", "-R", ".comment", "-R", ".note" };
 
-        @memcpy(args_buf, args);
-        @memcpy(args_buf[base_len..args_buf.len], self.static_artifacts.items);
+        @memcpy(args_buf[0..args.len], args);
 
-        var stripC = std.process.Child.init(args_buf[0 .. base_len + self.static_artifacts.items.len], self.allocator);
-        stripC.stdout_behavior = .Ignore;
-        _ = try stripC.spawnAndWait();
+        if (self.static_artifacts.items.len > 0) {
+            @memcpy(args_buf[base_len .. base_len + self.static_artifacts.items.len], self.static_artifacts.items);
 
-        // we can't use -g for dynamic libraries because it will also strip
-        // the dynamic symbol entries
-        args_buf[1] = "-s";
-        @memcpy(args_buf[base_len..args_buf.len], self.dynamic_artifacts.items);
-        stripC = std.process.Child.init(args_buf[0 .. base_len + self.dynamic_artifacts.items.len], self.allocator);
-        stripC.stdout_behavior = .Ignore;
-        _ = try stripC.spawnAndWait();
+            var stripC = std.process.Child.init(args_buf[0 .. base_len + self.static_artifacts.items.len], self.allocator);
+            stripC.stdout_behavior = .Ignore;
+            _ = try stripC.spawnAndWait();
+        }
+
+        if (self.dynamic_artifacts.items.len > 0) {
+            // we can't use -g for dynamic libraries because it will also strip
+            // the dynamic symbol entries
+            args_buf[1] = "-s";
+            @memcpy(args_buf[base_len .. base_len + self.dynamic_artifacts.items.len], self.dynamic_artifacts.items);
+            var stripC = std.process.Child.init(args_buf[0 .. base_len + self.dynamic_artifacts.items.len], self.allocator);
+            stripC.stdout_behavior = .Ignore;
+            _ = try stripC.spawnAndWait();
+        }
 
         return self.needed_lib_paths.items;
     }

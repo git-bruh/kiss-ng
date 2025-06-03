@@ -4,7 +4,9 @@ Next generation of the [KISS](https://codeberg.org/kiss-community/kiss) package 
 
 # TODO
 
-- [ ] alternatives & provides system
+- [ ] alternatives & choices system
+
+- [ ] provides system
 
 - [x] build
   - [ ] run as unprivileged user
@@ -17,8 +19,8 @@ Next generation of the [KISS](https://codeberg.org/kiss-community/kiss) package 
 
 - [x] install
   - [ ] dynamic dependency detector
-  - [ ] binary stripping
-  - [ ] conflicts
+  - [x] binary stripping
+  - [x] conflicts
 
 - [x] list
 
