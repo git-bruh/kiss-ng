@@ -128,6 +128,37 @@ pub const Package = struct {
         return try Package.new(allocator, &pkg_dir);
     }
 
+    // creates a hash map mapping file paths to package names
+    // we use an arena to "leak" the backing file buffers and just store
+    // pointers to paths in the hash map to avoid repeated allocations
+    pub fn get_installed_files_map(arena: *std.heap.ArenaAllocator, kiss_config: *const config.Config) !std.StringHashMap([]const u8) {
+        const allocator = arena.allocator();
+
+        var map = std.StringHashMap([]const u8).init(allocator);
+        errdefer map.deinit();
+
+        var installed_dir = try kiss_config.get_installed_dir();
+        defer installed_dir.close();
+
+        var it = installed_dir.iterate();
+        while (try it.next()) |entry| {
+            var buf: [std.fs.max_path_bytes]u8 = undefined;
+            const manifest_path = try std.fmt.bufPrint(&buf, "{s}/manifest", .{entry.name});
+            const manifest = try installed_dir.openFile(manifest_path, .{});
+            defer manifest.close();
+
+            const contents = try manifest.readToEndAlloc(allocator, 1 << 24);
+            const entry_copy = try allocator.dupe(u8, entry.name);
+
+            var manifest_iter = std.mem.splitScalar(u8, contents, '\n');
+            while (manifest_iter.next()) |path| {
+                try map.put(path, entry_copy);
+            }
+        }
+
+        return map;
+    }
+
     pub fn mark_implicit(self: *Package) void {
         self.implicit = true;
     }
@@ -319,12 +350,12 @@ pub const Package = struct {
         defer installed_db_dir.close();
         try fs.copyDir(repo_dir, installed_db_dir);
 
-        // try self.strip(nostrip);
-        // try self.fix_deps();
         var manifest_file = try installed_db_dir.createFile("manifest", .{});
         defer manifest_file.close();
 
-        if (pkg_dir.access("etc", .{}) != error.FileNotFound) {}
+        pkg_dir.access("etc", .{}) catch |err| {
+            if (err != error.FileNotFound) return err;
+        };
 
         var etcsums_file = if (pkg_dir.access("etc", .{})) try installed_db_dir.createFile("etcsums", .{}) else |err| blk: {
             if (err == error.FileNotFound) break :blk null;
@@ -333,7 +364,28 @@ pub const Package = struct {
         defer if (etcsums_file != null) etcsums_file.?.close();
         try Package.generateManifestEtcsums(pkg_dir, null, manifest_file.writer(), if (etcsums_file != null) etcsums_file.?.writer() else null);
 
-        if (!no_strip) try Package.strip(self.allocator, pkg_dir);
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+
+        var installed_files_map = try Package.get_installed_files_map(&arena, kiss_config);
+        defer installed_files_map.deinit();
+
+        const dependencies = try Package.walk_elf(self.allocator, &installed_files_map, &self.dependencies, pkg_dir, !no_strip);
+        defer dependencies.deinit();
+
+        if (dependencies.items.len > 0) {
+            const depends = try installed_db_dir.createFile("depends", .{});
+            defer depends.close();
+
+            var writer = depends.writer();
+
+            for (dependencies.items) |dependency| {
+                switch (dependency.kind) {
+                    .Build => try writer.print("{s} make\n", .{dependency.name}),
+                    .Runtime => try writer.print("{s}\n", .{dependency.name}),
+                }
+            }
+        }
 
         var bin_dir = try config.Config.get_bin_dir();
         defer bin_dir.close();
@@ -455,14 +507,52 @@ pub const Package = struct {
         if (skip_path_bytes != null) try manifest_writer.print("{s}/\n", .{dir_name});
     }
 
-    fn strip(allocator: std.mem.Allocator, dir: std.fs.Dir) !void {
+    fn walk_elf(allocator: std.mem.Allocator, installed_files_map: *const std.StringHashMap([]const u8), source_dependencies: *const std.ArrayList(Dependency), pkg_dir: std.fs.Dir, strip: bool) !std.ArrayList(Dependency) {
         var elf_iterator = elf.ElfIterator.new(allocator);
         defer elf_iterator.free();
 
-        try elf_iterator.walk(dir);
-        const needed_lib_paths = try elf_iterator.finalize();
+        var dependencies = try source_dependencies.clone();
+        errdefer dependencies.deinit();
 
-        _ = needed_lib_paths;
+        try elf_iterator.walk(pkg_dir);
+        const needed_lib_paths = try elf_iterator.finalize(strip);
+
+        blk: for (needed_lib_paths) |path| {
+            // if the file is provided by the package itself then we don't need
+            // to check further
+            pkg_dir.access(path[1..], .{}) catch |err| {
+                if (err != error.FileNotFound) return err;
+                const package = installed_files_map.get(path) orelse {
+                    std.log.info("need shared library {ks}, not provided by any package", .{path});
+                    continue;
+                };
+                // If the dependency already exists in the list then ensure
+                // it is marked as a runtime dependency and not just a build-time one
+                for (dependencies.items) |*dependency| {
+                    if (std.mem.eql(u8, dependency.name, package)) {
+                        if (dependency.kind == .Build) {
+                            dependency.kind = .Runtime;
+                            std.log.info("need shared library {ks}, provided by {ks}, was marked as build-time dependency", .{ path, package });
+                        }
+
+                        continue :blk;
+                    }
+                }
+
+                // Otherwise, add the dependency to the list
+                std.log.info("need shared library {ks}, provided by {ks}", .{ path, package });
+                try dependencies.append(.{
+                    .name = package,
+                    .kind = .Runtime,
+                });
+
+                continue;
+            };
+
+            std.log.info("need shared library {ks}, provided by package itself", .{path});
+        }
+
+        return dependencies;
     }
 
     pub fn install(self: *const Package, kiss_config: *config.Config) !bool {

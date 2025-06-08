@@ -131,7 +131,6 @@ pub const ElfIterator = struct {
                     continue;
                 }
 
-                try self.visited_libs.put(needed_lib, {});
                 try self.libs_to_check.append(needed_lib);
             }
 
@@ -147,16 +146,22 @@ pub const ElfIterator = struct {
                 });
                 defer poller.deinit();
 
-                while (try poller.poll()) {
-                    // this will be automatically freed with the pool
+                while (try poller.poll()) {}
+
+                var reader = poller.fifo(.stdout).reader();
+
+                while (true) {
                     const buf = try self.pool.create();
 
-                    const n = poller.fifo(.stdout).read(buf);
-                    if (n == 0) continue;
+                    const lib_mapping = sliceUntilWhitespace(reader.readUntilDelimiter(buf, '\n') catch |err| switch (err) {
+                        error.EndOfStream => {
+                            self.pool.destroy(buf);
+                            break;
+                        },
+                        else => return err,
+                    });
 
-                    const lib_mapping = buf[0..n];
-
-                    //  libzstd.so.1 => /lib/libzstd.so.1 (0x7f33a3d35000)
+                    // libzstd.so.1 => /lib/libzstd.so.1 (0x7f33a3d35000)
                     var it = std.mem.splitScalar(u8, lib_mapping, ' ');
                     // libzstd.so.1
                     const lib_name = it.next() orelse continue;
@@ -164,11 +169,15 @@ pub const ElfIterator = struct {
                     _ = it.next() orelse continue;
                     // /lib/libzstd.so.1
                     const lib_path = it.next() orelse continue;
+                    if (lib_path.len == 0 or lib_path[0] != '/') continue;
 
-                    const putRes = try self.visited_libs.getOrPut(lib_name);
+                    const put_res = try self.visited_libs.getOrPut(lib_name);
                     // don't append the same library path again
-                    if (putRes.found_existing) continue;
-                    try self.needed_lib_paths.append(lib_path);
+                    if (put_res.found_existing) continue;
+
+                    // this will be automatically freed with the pool
+                    const resolved_path = try std.fs.realpath(lib_path, buf);
+                    try self.needed_lib_paths.append(resolved_path);
                 }
 
                 _ = try lddC.wait();
@@ -204,7 +213,9 @@ pub const ElfIterator = struct {
     }
 
     /// strips the static & dynamic artifacts
-    pub fn finalize(self: *ElfIterator) ![][]const u8 {
+    pub fn finalize(self: *ElfIterator, strip: bool) ![][]const u8 {
+        if (!strip) return self.needed_lib_paths.items;
+
         // strip -<g|s> -R .comment -R .note <...>
         const base_len = 6;
         var args_buf = try self.allocator.alloc([]const u8, base_len + @max(self.static_artifacts.items.len, self.dynamic_artifacts.items.len));
@@ -245,3 +256,11 @@ pub const ElfIterator = struct {
         self.libs_to_check.deinit();
     }
 };
+
+fn sliceUntilWhitespace(contents: []const u8) []const u8 {
+    var idx: usize = 0;
+    while (idx < contents.len) : (idx += 1) {
+        if (!std.ascii.isWhitespace(contents[idx])) return contents[idx..];
+    }
+    return contents;
+}

@@ -9,7 +9,8 @@ Next generation of the [KISS](https://codeberg.org/kiss-community/kiss) package 
 - [ ] provides system
 
 - [x] build
-  - [ ] run as unprivileged user
+  - [x] dynamic dependency detection
+  - [x] binary stripping
   - [ ] sandboxed builds using [`landlock`](https://landlock.io)
 
 - [x] checksum
@@ -18,8 +19,6 @@ Next generation of the [KISS](https://codeberg.org/kiss-community/kiss) package 
   - [ ] parallel downloads
 
 - [x] install
-  - [ ] dynamic dependency detector
-  - [x] binary stripping
   - [x] conflicts
 
 - [x] list
