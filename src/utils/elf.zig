@@ -45,9 +45,20 @@ pub const ElfIterator = struct {
         var file = try std.fs.openFileAbsolute(file_name, .{});
         defer file.close();
 
-        // TODO this seems to break for .a files
         const header = std.elf.Header.read(file) catch |err| switch (err) {
-            error.InvalidElfMagic => return,
+            error.InvalidElfMagic => {
+                // !<arch> for .a files
+                var ar_header: [8]u8 = undefined;
+                file.seekTo(0) catch return;
+                _ = file.readAll(&ar_header) catch return;
+
+                if (std.mem.eql(u8, &ar_header, "!<arch>\n")) {
+                    std.log.info("got static archive {ks}", .{file_name});
+                    try self.static_artifacts.append(file_name);
+                }
+
+                return;
+            },
             error.EndOfStream => return,
             else => return err,
         };
