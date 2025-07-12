@@ -7,6 +7,7 @@ const archive = @import("utils/archive.zig");
 const fs = @import("utils/fs.zig");
 const unistd = @cImport(@cInclude("unistd.h"));
 const elf = @import("utils/elf.zig");
+const sandbox = @import("utils/sandbox.zig");
 
 /// A dependency can either be build time (needed just for building the package)
 /// or runtime (needed both at build time and runtime)
@@ -120,7 +121,7 @@ pub const Package = struct {
         return try Package.new(allocator, &dir);
     }
 
-    pub fn new_from_installed_db(allocator: std.mem.Allocator, kiss_config: *config.Config, name: []const u8) !Package {
+    pub fn new_from_installed_db(allocator: std.mem.Allocator, kiss_config: *const config.Config, name: []const u8) !Package {
         var installed_dir = try kiss_config.get_installed_dir();
         defer installed_dir.close();
 
@@ -256,7 +257,114 @@ pub const Package = struct {
         return true;
     }
 
-    pub fn build(self: *const Package, kiss_config: *const config.Config) !bool {
+    fn get_dependency_file_tree(self: *const Package, arena: *std.heap.ArenaAllocator, kiss_config: *const config.Config, installed_pkg_map: *std.StringHashMap(Package), files_map: *std.StringHashMap(void), name: []const u8) !Package {
+        const system_pkg = installed_pkg_map.get(name) orelse blk: {
+            const pkg = try Package.new_from_installed_db(self.allocator, kiss_config, name);
+            try installed_pkg_map.putNoClobber(name, pkg);
+            break :blk pkg;
+        };
+
+        const manifest = try read_until_end(arena.allocator(), system_pkg.dir, "manifest");
+        if (manifest == null) {
+            std.log.err("no manifest found for package {ks}", .{name});
+            return error.InvalidArgument;
+        }
+
+        var manifest_iter = std.mem.splitScalar(u8, manifest.?, '\n');
+        while (manifest_iter.next()) |path| {
+            try files_map.put(path, {});
+        }
+
+        return system_pkg;
+    }
+
+    fn get_dependencies_file_tree(self: *const Package, arena: *std.heap.ArenaAllocator, kiss_config: *const config.Config, visited_packages: *std.StringHashMap(void), installed_pkg_map: *std.StringHashMap(Package), files_map: *std.StringHashMap(void)) !void {
+        if (visited_packages.count() == 0) {
+            const base_pkgs: []const []const u8 = &.{ "baselayout", "busybox", "gcc", "git", "make", "musl" };
+            for (base_pkgs) |pkg| {
+                if (visited_packages.contains(pkg)) continue;
+                try visited_packages.put(pkg, {});
+                const system_pkg = try self.get_dependency_file_tree(arena, kiss_config, installed_pkg_map, files_map, pkg);
+                try system_pkg.get_dependencies_file_tree(arena, kiss_config, visited_packages, installed_pkg_map, files_map);
+            }
+        }
+
+        for (self.dependencies.items) |dependency| {
+            if (dependency.kind == .Build or visited_packages.contains(dependency.name)) continue;
+            try visited_packages.put(dependency.name, {});
+
+            const system_pkg = try self.get_dependency_file_tree(arena, kiss_config, installed_pkg_map, files_map, dependency.name);
+            try system_pkg.get_dependencies_file_tree(arena, kiss_config, visited_packages, installed_pkg_map, files_map);
+        }
+    }
+
+    // wraps the actual build function in a thread so that the landlock
+    // sandboxing is only limited to the build function and we don't end
+    // up restricting the rest of the pgroam
+    pub fn build(self: *const Package, kiss_config: *const config.Config, installed_pkg_map: *std.StringHashMap(Package)) !bool {
+        var ret: bool = undefined;
+        const thread = try std.Thread.spawn(.{}, Package.build_inner, .{ self, kiss_config, installed_pkg_map, &ret });
+        thread.join();
+        return ret;
+    }
+
+    fn build_inner(self: *const Package, kiss_config: *const config.Config, installed_pkg_map: *std.StringHashMap(Package), ret: *bool) !void {
+        var landlock = try sandbox.Landlock.init();
+        defer landlock.deinit();
+
+        // ensure we can always enumerate directories at any path, but not access files
+        try landlock.add_rule_at_path("/", sandbox.Permissions.ReadDir);
+
+        // basic paths
+        try landlock.add_rule_at_path(".", sandbox.Permissions.Read);
+        try landlock.add_rule_at_path("/proc", sandbox.Permissions.Read | sandbox.Permissions.Write | sandbox.Permissions.Execute);
+        try landlock.add_rule_at_path("/dev", sandbox.Permissions.Read | sandbox.Permissions.Write | sandbox.Permissions.Execute);
+        try landlock.add_rule_at_path("/tmp", sandbox.Permissions.Read | sandbox.Permissions.Write | sandbox.Permissions.Execute);
+
+        // write access for creating archives
+        try landlock.add_rule_at_path(config.CACHE_PATH ++ "/bin", sandbox.Permissions.Write);
+        // read access to archives
+        try landlock.add_rule_at_path(config.CACHE_PATH ++ "/sources", sandbox.Permissions.Read);
+        // write access for logging
+        try landlock.add_rule_at_path(config.CACHE_PATH ++ "/logs", sandbox.Permissions.Write);
+        // write & execute access for building projects
+        try landlock.add_rule_at_path(kiss_config.tmpdir orelse config.CACHE_PATH ++ "/proc", sandbox.Permissions.Read | sandbox.Permissions.Write | sandbox.Permissions.Execute);
+        // read & execute access for repository dir (executing build script)
+        try landlock.add_rule_with_children(self.dir.fd, sandbox.Permissions.Read | sandbox.Permissions.Execute);
+
+        // allow access to read all files provided by dependencies
+        {
+            var arena = std.heap.ArenaAllocator.init(self.allocator);
+            defer arena.deinit();
+
+            var visited_pkgs_map = std.StringHashMap(void).init(arena.allocator());
+            defer visited_pkgs_map.deinit();
+
+            var files_map = std.StringHashMap(void).init(arena.allocator());
+            defer files_map.deinit();
+
+            try self.get_dependencies_file_tree(&arena, kiss_config, &visited_pkgs_map, installed_pkg_map, &files_map);
+
+            var it = files_map.keyIterator();
+            while (it.next()) |path| {
+                const fd = std.posix.open(path.*, .{}, 0) catch |err| {
+                    std.log.warn("failed to open path {ks} for landlock: {}", .{ path.*, err });
+                    continue;
+                };
+                defer std.posix.close(fd);
+
+                // TODO skip fstat
+                try landlock.add_rule(fd, sandbox.Permissions.Read | sandbox.Permissions.Execute);
+            }
+
+            // we need to enumerate installed packages for dependency detection
+            var installed_dir = try kiss_config.get_installed_dir();
+            defer installed_dir.close();
+            try landlock.add_rule_with_children(installed_dir.fd, sandbox.Permissions.Read);
+        }
+
+        try landlock.enforce();
+
         var build_dir = try kiss_config.get_proc_build_dir();
         defer {
             build_dir.close();
@@ -325,7 +433,10 @@ pub const Package = struct {
             dir.close();
         }
 
-        if (!try self.execBuildScript(build_dir, pkg_dir, log_file)) return false;
+        if (!try self.execBuildScript(build_dir, pkg_dir, log_file)) {
+            ret.* = false;
+            return;
+        }
 
         const no_strip = blk: {
             build_dir.access("nostrip", .{}) catch |err| {
@@ -399,7 +510,7 @@ pub const Package = struct {
         bin_dir.deleteFile(path[1..path.len]) catch |err| if (err != error.FileNotFound) return err;
         try bin_dir.rename(path, path[1..path.len]);
 
-        return true;
+        ret.* = true;
     }
 
     fn execBuildScript(self: *const Package, build_dir: std.fs.Dir, pkg_dir: std.fs.Dir, log_file: std.fs.File) !bool {
@@ -907,7 +1018,7 @@ fn read_until_end(allocator: std.mem.Allocator, dir: std.fs.Dir, name: []const u
     };
     defer file.close();
 
-    return try file.readToEndAlloc(allocator, 1 << 16);
+    return try file.readToEndAlloc(allocator, 1 << 24);
 }
 
 fn sliceTillWhitespace(contents: []const u8) []const u8 {
