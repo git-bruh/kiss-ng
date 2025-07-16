@@ -21,7 +21,7 @@ pub const ElfIterator = struct {
     needed_offsets: std.ArrayList(std.elf.Elf64_Addr),
     // temporary variable re-used across invocations
     // contains libraries that should be extracted from `ldd` output
-    libs_to_check: std.ArrayList([]const u8),
+    libs_to_check: std.StringHashMap(void),
 
     pub fn new(allocator: std.mem.Allocator) ElfIterator {
         return .{
@@ -32,7 +32,7 @@ pub const ElfIterator = struct {
             .dynamic_artifacts = std.ArrayList([]const u8).init(allocator),
             .visited_libs = std.StringHashMap(void).init(allocator),
             .needed_offsets = std.ArrayList(std.elf.Elf64_Addr).init(allocator),
-            .libs_to_check = std.ArrayList([]const u8).init(allocator),
+            .libs_to_check = std.StringHashMap(void).init(allocator),
         };
     }
 
@@ -142,10 +142,10 @@ pub const ElfIterator = struct {
                     continue;
                 }
 
-                try self.libs_to_check.append(needed_lib);
+                try self.libs_to_check.put(needed_lib, {});
             }
 
-            if (self.libs_to_check.items.len > 0) {
+            if (self.libs_to_check.count() > 0) {
                 var lddC = std.process.Child.init(&.{ "ldd", file_name }, self.allocator);
                 lddC.stdout_behavior = .Pipe;
                 lddC.stderr_behavior = .Ignore;
@@ -181,6 +181,9 @@ pub const ElfIterator = struct {
                     // /lib/libzstd.so.1
                     const lib_path = it.next() orelse continue;
                     if (lib_path.len == 0 or lib_path[0] != '/') continue;
+
+                    // we only want to consider DT_NEEDED dependencies, not transitive ones
+                    if (self.libs_to_check.get(lib_name) == null) continue;
 
                     const put_res = try self.visited_libs.getOrPut(lib_name);
                     // don't append the same library path again
