@@ -279,7 +279,9 @@ pub const Package = struct {
     }
 
     fn get_dependencies_file_tree(self: *const Package, arena: *std.heap.ArenaAllocator, kiss_config: *const config.Config, visited_packages: *std.StringHashMap(void), installed_pkg_map: *std.StringHashMap(Package), files_map: *std.StringHashMap(void)) !void {
-        if (visited_packages.count() == 0) {
+        const is_main_pkg = visited_packages.count() == 0;
+
+        if (is_main_pkg) {
             const base_pkgs: []const []const u8 = &.{ "baselayout", "busybox", "gcc", "git", "make", "musl" };
             for (base_pkgs) |pkg| {
                 if (visited_packages.contains(pkg)) continue;
@@ -290,7 +292,9 @@ pub const Package = struct {
         }
 
         for (self.dependencies.items) |dependency| {
-            if (dependency.kind == .Build or visited_packages.contains(dependency.name)) continue;
+            // we don't need to allow access to transitive build-time dependencies
+            // as the dependencies are already built & installed
+            if ((!is_main_pkg and dependency.kind == .Build) or visited_packages.contains(dependency.name)) continue;
             try visited_packages.put(dependency.name, {});
 
             const system_pkg = try self.get_dependency_file_tree(arena, kiss_config, installed_pkg_map, files_map, dependency.name);
