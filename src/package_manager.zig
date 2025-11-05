@@ -160,6 +160,11 @@ pub const PackageManager = struct {
             if (pkg.implicit) {
                 std.log.info("{ks} needed as dependency, installing", .{pkg.name});
                 if (!try pkg.install(&self.kiss_config)) return false;
+
+                // must remove entry as the existing FDs are now invalid
+                var installed_pkg = installed_pkg_map.get(pkg.name) orelse continue;
+                _ = installed_pkg_map.remove(pkg.name);
+                installed_pkg.free();
             }
         }
 
@@ -226,6 +231,11 @@ pub const PackageManager = struct {
 
             if (!try pkg.build(&self.kiss_config, &installed_pkg_map)) return false;
             if (!try pkg.install(&self.kiss_config)) return false;
+
+            // must remove entry as the existing FDs are now invalid
+            var installed_pkg = installed_pkg_map.get(pkg.name) orelse continue;
+            _ = installed_pkg_map.remove(pkg.name);
+            installed_pkg.free();
         }
 
         return true;

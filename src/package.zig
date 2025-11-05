@@ -6,6 +6,11 @@ const git_util = @import("utils/git.zig");
 const archive = @import("utils/archive.zig");
 const fs = @import("utils/fs.zig");
 const unistd = @cImport(@cInclude("unistd.h"));
+const sched = @cImport({
+    @cDefine("_GNU_SOURCE", {});
+    @cInclude("sched.h");
+});
+const mount = @cImport(@cInclude("sys/mount.h"));
 const elf = @import("utils/elf.zig");
 const sandbox = @import("utils/sandbox.zig");
 
@@ -282,7 +287,7 @@ pub const Package = struct {
         const is_main_pkg = visited_packages.count() == 0;
 
         if (is_main_pkg) {
-            const base_pkgs: []const []const u8 = &.{ "baselayout", "busybox", "gcc", "git", "make", "musl" };
+            const base_pkgs: []const []const u8 = &.{ "baselayout", "busybox", "gcc", "git", "gnugrep", "linux-headers", "make", "musl", "util-linux" };
             for (base_pkgs) |pkg| {
                 if (visited_packages.contains(pkg)) continue;
                 try visited_packages.put(pkg, {});
@@ -306,6 +311,8 @@ pub const Package = struct {
     // sandboxing is only limited to the build function and we don't end
     // up restricting the rest of the pgroam
     pub fn build(self: *const Package, kiss_config: *const config.Config, installed_pkg_map: *std.StringHashMap(Package)) !bool {
+        defer kiss_config.rm_proc_dir() catch |err| std.log.err("failed to clean build directory: {}", .{err});
+
         var ret: bool = undefined;
         const thread = try std.Thread.spawn(.{}, Package.build_inner, .{ self, kiss_config, installed_pkg_map, &ret });
         thread.join();
@@ -336,6 +343,15 @@ pub const Package = struct {
         // read & execute access for repository dir (executing build script)
         try landlock.add_rule_with_children(self.dir.fd, sandbox.Permissions.Read | sandbox.Permissions.Execute);
 
+        var sysroot_dir = try kiss_config.get_proc_sysroot_dir();
+        defer sysroot_dir.close();
+
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const sysroot_dir_path = try fs.readLink(sysroot_dir.fd, &buf);
+
+        var inBuf: [std.fs.max_path_bytes]u8 = undefined;
+        const build_file_path = try self.copyBuildScript(kiss_config.tmpdir orelse (config.CACHE_PATH ++ "/proc"), &inBuf);
+
         // allow access to read all files provided by dependencies
         {
             var arena = std.heap.ArenaAllocator.init(self.allocator);
@@ -349,6 +365,11 @@ pub const Package = struct {
 
             try self.get_dependencies_file_tree(&arena, kiss_config, &visited_pkgs_map, installed_pkg_map, &files_map);
 
+            var files = std.ArrayList([]const u8).init(arena.allocator());
+            defer files.deinit();
+
+            try files.ensureTotalCapacity(files_map.capacity());
+
             var it = files_map.keyIterator();
             while (it.next()) |path| {
                 const fd = std.posix.open(path.*, .{}, 0) catch |err| {
@@ -359,24 +380,67 @@ pub const Package = struct {
 
                 // TODO skip fstat
                 try landlock.add_rule(fd, sandbox.Permissions.Read | sandbox.Permissions.Execute);
+                files.appendAssumeCapacity(path.*);
             }
 
             // we need to enumerate installed packages for dependency detection
             var installed_dir = try kiss_config.get_installed_dir();
             defer installed_dir.close();
             try landlock.add_rule_with_children(installed_dir.fd, sandbox.Permissions.Read);
-        }
 
-        try landlock.enforce();
+            // sort files in ascending order so directories come before files
+            std.mem.sort([]const u8, files.items, {}, struct {
+                fn cmp(_: void, lhs: []const u8, rhs: []const u8) bool {
+                    return std.mem.order(u8, lhs, rhs) == .lt;
+                }
+            }.cmp);
+
+            // for some reason we get EXDEV after landlock enforcement
+            for (files.items) |path| {
+                if (path.len == 0) @panic("got empty path in manifest");
+                try if (path[path.len - 1] == '/') sysroot_dir.makeDir(path[1..path.len]) else std.posix.linkat(-1, path, sysroot_dir.fd, path[1..path.len], 0);
+            }
+
+            const unshare_err = std.posix.errno(sched.unshare(sched.CLONE_NEWNS));
+            if (unshare_err != .SUCCESS) {
+                std.log.err("failed to unshare(): {}", .{unshare_err});
+                ret.* = false;
+                return;
+            }
+
+            const paths: []const []const u8 = &.{ config.CACHE_PATH, config.DB_PATH, "/dev", "/sys", "/proc" };
+            for (paths) |dir| {
+                var sandbox_buf: [std.fs.max_path_bytes]u8 = undefined;
+                const sandbox_dir_path = try std.fmt.bufPrint(&sandbox_buf, "{s}/{s}", .{ sysroot_dir_path, dir });
+
+                var sandbox_dir = try fs.mkdirParents(null, sandbox_dir_path);
+                sandbox_dir.close();
+
+                const dir_c = std.posix.toPosixPath(dir) catch unreachable;
+                const sandbox_dir_c = std.posix.toPosixPath(sandbox_dir_path) catch unreachable;
+
+                const mount_err = std.posix.errno(mount.mount(
+                    &dir_c,
+                    &sandbox_dir_c,
+                    null,
+                    mount.MS_BIND,
+                    null,
+                ));
+                if (mount_err != .SUCCESS) {
+                    std.log.err("failed to mount({s}) at {s}: {}", .{ dir, sandbox_dir_path, mount_err });
+                    ret.* = false;
+                    return;
+                }
+            }
+
+            try landlock.enforce();
+        }
 
         var build_dir = try kiss_config.get_proc_build_dir();
-        defer {
-            build_dir.close();
-            kiss_config.rm_proc_dir() catch |err| {
-                std.log.err("failed to clean build directory: {}", .{err});
-            };
-        }
+        defer build_dir.close();
 
+        // must extract sources before unshare() + chroot() as we have to access
+        // user-defined directories
         for (self.sources.items) |source| switch (source) {
             .Git => |git| {
                 std.log.info("handling git source {ks}", .{git.clone_url});
@@ -422,6 +486,14 @@ pub const Package = struct {
             },
         };
 
+        const sysroot_dir_path_c = std.posix.toPosixPath(sysroot_dir_path) catch unreachable;
+        const chroot_err = std.posix.errno(unistd.chroot(&sysroot_dir_path_c));
+        if (chroot_err != .SUCCESS) {
+            std.log.err("failed to chroot({s}: {}", .{ sysroot_dir_path, chroot_err });
+            ret.* = false;
+            return;
+        }
+
         var pkg_dir = try kiss_config.get_proc_pkg_dir();
         defer pkg_dir.close();
 
@@ -431,13 +503,16 @@ pub const Package = struct {
         var log_file = try config.Config.get_proc_log_file(log_dir, self.name);
         defer log_file.close();
 
+        var chrooted_build_dir = try kiss_config.get_proc_build_dir();
+        defer chrooted_build_dir.close();
+
         // create empty /var/db/kiss/installed in build directory
         {
             var dir = try fs.mkdirParents(pkg_dir, config.DB_PATH_INSTALLED);
             dir.close();
         }
 
-        if (!try self.execBuildScript(build_dir, pkg_dir, log_file)) {
+        if (!try self.execBuildScript(chrooted_build_dir, pkg_dir, log_file, build_file_path)) {
             ret.* = false;
             return;
         }
@@ -455,7 +530,6 @@ pub const Package = struct {
             std.log.err("failed to clean log file: {}", .{err});
         };
 
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
         const pkg_db_path = try std.fmt.bufPrint(&buf, "{s}/{s}", .{ config.DB_PATH_INSTALLED, self.name });
 
         // re-open here as iteration permission is not guaranteed
@@ -517,7 +591,20 @@ pub const Package = struct {
         ret.* = true;
     }
 
-    fn execBuildScript(self: *const Package, build_dir: std.fs.Dir, pkg_dir: std.fs.Dir, log_file: std.fs.File) !bool {
+    fn copyBuildScript(self: *const Package, tmpdir: []const u8, buf: *[std.fs.max_path_bytes]u8) ![]u8 {
+        var outBuf: [std.fs.max_path_bytes]u8 = undefined;
+
+        const repo_path = try fs.readLink(self.dir.fd, buf);
+        const build_file_path = try std.fmt.bufPrint(&outBuf, "{s}/build", .{repo_path});
+        const tmp_file_path = try std.fmt.bufPrint(buf, "{s}/{d}/script", .{ tmpdir, std.os.linux.getpid() });
+
+        std.log.info("COPYING {ks} to {ks}", .{ build_file_path, tmp_file_path });
+
+        try std.fs.copyFileAbsolute(build_file_path, tmp_file_path, .{});
+        return tmp_file_path;
+    }
+
+    fn execBuildScript(self: *const Package, build_dir: std.fs.Dir, pkg_dir: std.fs.Dir, log_file: std.fs.File, build_file_path: []const u8) !bool {
         var env_map = try std.process.getEnvMap(self.allocator);
         defer env_map.deinit();
 
@@ -538,8 +625,6 @@ pub const Package = struct {
         try env_map.put("GOPATH", try std.fmt.bufPrint(&tmpBuf, "{s}/go", .{build_path}));
         try env_map.put("RUSTFLAGS", try std.fmt.bufPrint(&tmpBuf, "--remap-path-prefix={s}=.", .{build_path}));
 
-        const repo_path = try fs.readLink(self.dir.fd, &outBuf);
-        const build_file_path = try std.fmt.bufPrint(&tmpBuf, "{s}/build", .{repo_path});
         const pkg_path = try fs.readLink(pkg_dir.fd, &outBuf);
 
         var child = std.process.Child.init(&.{ build_file_path, pkg_path, try self.version_without_release() }, self.allocator);
@@ -623,7 +708,10 @@ pub const Package = struct {
     }
 
     fn walk_elf(allocator: std.mem.Allocator, installed_files_map: *const std.StringHashMap([]const u8), source_dependencies: *const std.ArrayList(Dependency), pkg_dir: std.fs.Dir, strip: bool) !std.ArrayList(Dependency) {
-        var elf_iterator = elf.ElfIterator.new(allocator);
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+
+        var elf_iterator = elf.ElfIterator.new(&arena);
         defer elf_iterator.free();
 
         var dependencies = try source_dependencies.clone();
@@ -814,11 +902,15 @@ pub const Package = struct {
             self.allocator.free(manifest);
             manifest = try read_until_end(self.allocator, pkg_dir, "manifest") orelse unreachable;
             it = std.mem.splitBackwardsScalar(u8, sliceTillWhitespace(manifest), '\n');
+
+            // TODO handle conflicts during installation
+            std.log.err("not proceeding with installation, found conflicts", .{});
+            return false;
         }
 
         if (system_pkg != null) {
             std.log.info("removing system package", .{});
-            if (!try system_pkg.?.remove_nolock(kiss_config)) return false;
+            if (!try system_pkg.?.remove_nolock(kiss_config, true)) return false;
         }
 
         it.reset();
@@ -832,12 +924,13 @@ pub const Package = struct {
 
     // this is a separate function because it is called during the installation
     // process where the lock is already acquired
-    pub fn remove_nolock(self: *const Package, kiss_config: *const config.Config) !bool {
+    pub fn remove_nolock(self: *const Package, kiss_config: *const config.Config, upgrading: bool) !bool {
         var installed_pkg_dir = try kiss_config.get_installed_dir();
         defer installed_pkg_dir.close();
 
         var deps_it = installed_pkg_dir.iterate();
-        while (try deps_it.next()) |entry| {
+        // we don't need to check dependent packages if we're upgrading the package
+        if (!upgrading) while (try deps_it.next()) |entry| {
             var pkg_dir = try installed_pkg_dir.openDir(entry.name, .{});
             defer pkg_dir.close();
 
@@ -854,7 +947,7 @@ pub const Package = struct {
                     if (!kiss_config.force) return false;
                 }
             }
-        }
+        };
 
         const manifest = try read_until_end(self.allocator, self.dir, "manifest") orelse @panic("installed pkg has no manifest");
         defer self.allocator.free(manifest);
@@ -876,36 +969,43 @@ pub const Package = struct {
         while (it.next()) |path| {
             if (path.len <= 1) continue;
 
+            const is_dir = std.mem.endsWith(u8, path, "/");
             // skip 1 index on path to avoid making it absolute, ensuring
             // it is relative to KISS_ROOT rather than /
-            const rel_path = path[1..path.len];
+            const rel_path = path[1..if (is_dir) path.len - 1 else path.len];
 
-            if (std.mem.endsWith(u8, path, "/")) {
+            // checking for directory symlinks only works if we omit the trailing slash
+            const stat = try std.posix.fstatat(root_dir.fd, rel_path, std.c.AT.SYMLINK_NOFOLLOW);
+            if ((stat.mode & std.c.S.IFMT) == std.c.S.IFLNK) {
+                var dir = root_dir.openDir(rel_path, .{}) catch |err| {
+                    if (err == error.NotDir or err == error.FileNotFound) {
+                        try root_dir.deleteFile(rel_path);
+                        continue;
+                    }
+                    std.log.err("failed to openDir({s}): {}", .{ rel_path, err });
+                    return false;
+                };
+                dir.close();
+                // if symlink is a directory, deal with it later
+                try directory_symlinks.append(rel_path);
+                continue;
+            }
+
+            if (is_dir) {
                 root_dir.deleteDir(rel_path) catch |err| {
                     // directory can either have more contents or it might've
                     // been deleted as part of the removal process for another
                     // package because there is no exclusivity of directory
                     // ownership
                     if (err == error.DirNotEmpty or err == error.FileNotFound) continue;
-                    return err;
+                    std.log.err("failed to deleteDir({s}): {}", .{ rel_path, err });
+                    return false;
                 };
             } else {
-                const stat = try std.posix.fstatat(root_dir.fd, rel_path, std.c.AT.SYMLINK_NOFOLLOW);
-                if ((stat.mode & std.c.S.IFMT) == std.c.S.IFLNK) {
-                    var dir = root_dir.openDir(rel_path, .{}) catch |err| {
-                        if (err == error.NotDir or err == error.FileNotFound) {
-                            try root_dir.deleteFile(rel_path);
-                            continue;
-                        }
-                        std.log.err("failed to openDir({s}): {}", .{ rel_path, err });
-                        return false;
-                    };
-                    dir.close();
-                    // if symlink is a directory, deal with it later
-                    try directory_symlinks.append(rel_path);
-                    continue;
-                }
-                try root_dir.deleteFile(rel_path);
+                root_dir.deleteFile(rel_path) catch |err| {
+                    std.log.err("failed to deleteFile({s}): {}", .{ rel_path, err });
+                    return false;
+                };
             }
         }
 
@@ -935,7 +1035,7 @@ pub const Package = struct {
     pub fn remove(self: *const Package, kiss_config: *const config.Config) !bool {
         const lock_file = try config.Config.acquire_lock();
         defer config.Config.release_lock(lock_file);
-        return try self.remove_nolock(kiss_config);
+        return try self.remove_nolock(kiss_config, false);
     }
 
     pub fn free(self: *Package) void {

@@ -4,7 +4,6 @@ const fs = @import("./fs.zig");
 /// iterates over all ELF files in the directory structure
 pub const ElfIterator = struct {
     allocator: std.mem.Allocator,
-    pool: std.heap.MemoryPool([std.fs.max_path_bytes]u8),
 
     // list of system paths that the ELF objects link to
     needed_lib_paths: std.ArrayList([]const u8),
@@ -23,10 +22,10 @@ pub const ElfIterator = struct {
     // contains libraries that should be extracted from `ldd` output
     libs_to_check: std.StringHashMap(void),
 
-    pub fn new(allocator: std.mem.Allocator) ElfIterator {
+    pub fn new(arena: *std.heap.ArenaAllocator) ElfIterator {
+        const allocator = arena.allocator();
         return .{
             .allocator = allocator,
-            .pool = std.heap.MemoryPool([std.fs.max_path_bytes]u8).init(allocator),
             .needed_lib_paths = std.ArrayList([]const u8).init(allocator),
             .static_artifacts = std.ArrayList([]const u8).init(allocator),
             .dynamic_artifacts = std.ArrayList([]const u8).init(allocator),
@@ -129,20 +128,13 @@ pub const ElfIterator = struct {
                 }
             }
 
+            var buf: [std.fs.max_path_bytes]u8 = undefined;
+
             for (self.needed_offsets.items) |off| {
                 try file.seekableStream().seekTo(strtab_offset.? + off);
-                const buf = try self.pool.create();
-
-                const needed_lib = file.reader().readUntilDelimiter(buf, 0) catch |e| {
-                    self.pool.destroy(buf);
-                    return e;
-                };
-                if (self.visited_libs.contains(needed_lib)) {
-                    self.pool.destroy(buf);
-                    continue;
-                }
-
-                try self.libs_to_check.put(needed_lib, {});
+                const needed_lib = try file.reader().readUntilDelimiter(&buf, 0);
+                if (self.visited_libs.contains(needed_lib)) continue;
+                try self.libs_to_check.put(try self.allocator.dupe(u8, needed_lib), {});
             }
 
             if (self.libs_to_check.count() > 0) {
@@ -162,13 +154,8 @@ pub const ElfIterator = struct {
                 var reader = poller.fifo(.stdout).reader();
 
                 while (true) {
-                    const buf = try self.pool.create();
-
-                    const lib_mapping = sliceUntilWhitespace(reader.readUntilDelimiter(buf, '\n') catch |err| switch (err) {
-                        error.EndOfStream => {
-                            self.pool.destroy(buf);
-                            break;
-                        },
+                    const lib_mapping = sliceUntilWhitespace(reader.readUntilDelimiter(&buf, '\n') catch |err| switch (err) {
+                        error.EndOfStream => break,
                         else => return err,
                     });
 
@@ -185,13 +172,16 @@ pub const ElfIterator = struct {
                     // we only want to consider DT_NEEDED dependencies, not transitive ones
                     if (self.libs_to_check.get(lib_name) == null) continue;
 
-                    const put_res = try self.visited_libs.getOrPut(lib_name);
+                    const put_res = try self.visited_libs.getOrPut(try self.allocator.dupe(u8, lib_name));
                     // don't append the same library path again
                     if (put_res.found_existing) continue;
 
                     // this will be automatically freed with the pool
-                    const resolved_path = try std.fs.realpath(lib_path, buf);
-                    try self.needed_lib_paths.append(resolved_path);
+                    const resolved_path = std.fs.realpath(lib_path, &buf) catch |err| {
+                        std.log.err("not able to resolve path {ks}: {}", .{ lib_path, err });
+                        continue;
+                    };
+                    try self.needed_lib_paths.append(try self.allocator.dupe(u8, resolved_path));
                 }
 
                 _ = try lddC.wait();
@@ -213,7 +203,7 @@ pub const ElfIterator = struct {
                     try self.walk(sub_dir);
                 },
                 .file => {
-                    const file_name_buf = try self.pool.create();
+                    const file_name_buf = try self.allocator.alloc(u8, std.fs.max_path_bytes);
                     try self.parse_file(try std.fmt.bufPrint(
                         file_name_buf,
                         "{s}/{s}",
@@ -261,7 +251,6 @@ pub const ElfIterator = struct {
     }
 
     pub fn free(self: *ElfIterator) void {
-        self.pool.deinit();
         self.needed_lib_paths.deinit();
         self.static_artifacts.deinit();
         self.dynamic_artifacts.deinit();

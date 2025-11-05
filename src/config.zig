@@ -1,9 +1,9 @@
 const std = @import("std");
 const fs = @import("utils/fs.zig");
 
-pub const DB_PATH = "var/db/kiss";
-pub const DB_PATH_INSTALLED = DB_PATH ++ "/installed";
-pub const DB_PATH_CHOICES = DB_PATH ++ "/choices";
+pub const DB_PATH = "/var/db/kiss";
+pub const DB_PATH_INSTALLED = DB_PATH[1..DB_PATH.len] ++ "/installed";
+pub const DB_PATH_CHOICES = DB_PATH[1..DB_PATH.len] ++ "/choices";
 
 pub const CACHE_PATH = "/var/cache/kiss";
 
@@ -152,6 +152,13 @@ pub const Config = struct {
     pub fn get_proc_pkg_dir(self: *const Config) !std.fs.Dir {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
         const path = try std.fmt.bufPrint(&buf, "{s}/{d}/pkg", .{ self.tmpdir orelse (CACHE_PATH ++ "/proc"), std.os.linux.getpid() });
+
+        return try fs.mkdirParents(null, path);
+    }
+
+    pub fn get_proc_sysroot_dir(self: *const Config) !std.fs.Dir {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = try std.fmt.bufPrint(&buf, "{s}/{d}/sysroot", .{ self.tmpdir orelse (CACHE_PATH ++ "/proc"), std.os.linux.getpid() });
 
         return try fs.mkdirParents(null, path);
     }

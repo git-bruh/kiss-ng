@@ -11,7 +11,7 @@ Next generation of the [KISS](https://codeberg.org/kiss-community/kiss) package 
 - [x] build
   - [x] dynamic dependency detection
   - [x] binary stripping
-  - [ ] sandboxed builds using [`landlock`](https://landlock.io)
+  - [x] sandboxed builds using [`landlock`](https://landlock.io)
 
 - [x] checksum
 
