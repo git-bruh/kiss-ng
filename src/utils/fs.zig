@@ -75,7 +75,13 @@ pub fn copyStructure(src_dir: std.fs.Dir, target_dir: std.fs.Dir, paths: anytype
         if ((stat.mode & std.c.S.IFMT) == std.c.S.IFLNK) {
             var buf: [std.fs.max_path_bytes]u8 = undefined;
             const link_path = try src_dir.readLink(rel_path, &buf);
-            try target_dir.symLink(link_path, rel_path, .{});
+            target_dir.symLink(link_path, rel_path, .{}) catch |err| {
+                // this can happen if the symlink was not removed as it pointed
+                // to a valid directory
+                if (err == error.PathAlreadyExists) continue;
+                std.log.err("failed to create symlink {s} to {s}: {}", .{ rel_path, link_path, err });
+                return err;
+            };
             continue;
         }
 
