@@ -13,6 +13,7 @@ const sched = @cImport({
 const mount = @cImport(@cInclude("sys/mount.h"));
 const elf = @import("utils/elf.zig");
 const sandbox = @import("utils/sandbox.zig");
+const signal = @import("utils/signal.zig");
 
 /// A dependency can either be build time (needed just for building the package)
 /// or runtime (needed both at build time and runtime)
@@ -311,6 +312,9 @@ pub const Package = struct {
     // sandboxing is only limited to the build function and we don't end
     // up restricting the rest of the pgroam
     pub fn build(self: *const Package, kiss_config: *const config.Config, installed_pkg_map: *std.StringHashMap(Package)) !bool {
+        signal.block_sigint();
+        defer signal.unblock_sigint();
+
         defer kiss_config.rm_proc_dir() catch |err| std.log.err("failed to clean build directory: {}", .{err});
 
         var ret: bool = undefined;
@@ -598,8 +602,6 @@ pub const Package = struct {
         const build_file_path = try std.fmt.bufPrint(&outBuf, "{s}/build", .{repo_path});
         const tmp_file_path = try std.fmt.bufPrint(buf, "{s}/{d}/script", .{ tmpdir, std.os.linux.getpid() });
 
-        std.log.info("COPYING {ks} to {ks}", .{ build_file_path, tmp_file_path });
-
         try std.fs.copyFileAbsolute(build_file_path, tmp_file_path, .{});
         return tmp_file_path;
     }
@@ -634,7 +636,15 @@ pub const Package = struct {
         child.stdout_behavior = .Pipe;
         child.stderr_behavior = .Pipe;
 
-        try child.spawn();
+        // child processes inherit the sigprocmask so we must temporarily unblock it
+        // TODO this has a potential race, we should ideally unblock the signals after
+        // fork() but the Child abstraction does not allow us to do so
+        signal.unblock_sigint();
+        child.spawn() catch |err| {
+            signal.block_sigint();
+            return err;
+        };
+        signal.block_sigint();
 
         var poller = std.io.poll(self.allocator, enum { stdout, stderr }, .{
             .stdout = child.stdout.?,
@@ -652,12 +662,8 @@ pub const Package = struct {
         }
 
         const term = try child.wait();
-        if (term != .Exited) {
-            @panic("process didn't terminate as expected");
-        }
-
-        if (term.Exited != 0) {
-            std.log.err("build failed with status {d}", .{term.Exited});
+        if (term != .Exited or term.Exited != 0) {
+            std.log.err("build failed with term: {}", .{term});
             return false;
         }
 
@@ -759,6 +765,9 @@ pub const Package = struct {
     }
 
     pub fn install(self: *const Package, kiss_config: *config.Config) !bool {
+        signal.block_sigint();
+        defer signal.unblock_sigint();
+
         const lock_file = try config.Config.acquire_lock();
         defer config.Config.release_lock(lock_file);
 
