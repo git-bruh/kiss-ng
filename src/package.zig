@@ -288,7 +288,7 @@ pub const Package = struct {
         const is_main_pkg = visited_packages.count() == 0;
 
         if (is_main_pkg) {
-            const base_pkgs: []const []const u8 = &.{ "baselayout", "busybox", "gcc", "git", "gnugrep", "linux-headers", "make", "musl", "util-linux" };
+            const base_pkgs: []const []const u8 = &.{ "baselayout", "busybox", "gcc", "git", "gnugrep", "linux-headers", "make", "musl", "pkgconf", "util-linux" };
             for (base_pkgs) |pkg| {
                 if (visited_packages.contains(pkg)) continue;
                 try visited_packages.put(pkg, {});
@@ -402,7 +402,20 @@ pub const Package = struct {
             // for some reason we get EXDEV after landlock enforcement
             for (files.items) |path| {
                 if (path.len == 0) @panic("got empty path in manifest");
-                try if (path[path.len - 1] == '/') sysroot_dir.makeDir(path[1..path.len]) else std.posix.linkat(-1, path, sysroot_dir.fd, path[1..path.len], 0);
+                if (path[path.len - 1] == '/') {
+                    sysroot_dir.makeDir(path[1..path.len]) catch |err| {
+                        if (err == error.PathAlreadyExists) {
+                            std.log.warn("path {ks} already exists, checking if directory symlink", .{path});
+                            const stat = try std.posix.fstatat(sysroot_dir.fd, path[1 .. path.len - 1], std.c.AT.SYMLINK_NOFOLLOW);
+                            if ((stat.mode & std.c.S.IFMT) == std.c.S.IFLNK) {
+                                continue;
+                            }
+                        }
+                        return err;
+                    };
+                } else {
+                    try std.posix.linkat(-1, path, sysroot_dir.fd, path[1..path.len], 0);
+                }
             }
 
             const unshare_err = std.posix.errno(sched.unshare(sched.CLONE_NEWNS));
