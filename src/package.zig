@@ -404,14 +404,10 @@ pub const Package = struct {
                 if (path.len == 0) @panic("got empty path in manifest");
                 if (path[path.len - 1] == '/') {
                     sysroot_dir.makeDir(path[1..path.len]) catch |err| {
-                        if (err == error.PathAlreadyExists) {
-                            std.log.warn("path {ks} already exists, checking if directory symlink", .{path});
-                            const stat = try std.posix.fstatat(sysroot_dir.fd, path[1 .. path.len - 1], std.c.AT.SYMLINK_NOFOLLOW);
-                            if ((stat.mode & std.c.S.IFMT) == std.c.S.IFLNK) {
-                                continue;
-                            }
-                        }
-                        return err;
+                        if (err != error.PathAlreadyExists) return err;
+                        // this happens in case packages install files to /usr/lib64 instead of /usr/lib
+                        // eg. /usr/lib/cmake/ exists in one manifest, but /usr/lib64/cmake/ exists in another
+                        std.log.warn("path {ks} already exists (likely due to symlink)", .{path});
                     };
                 } else {
                     try std.posix.linkat(-1, path, sysroot_dir.fd, path[1..path.len], 0);
