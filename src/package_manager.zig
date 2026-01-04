@@ -27,9 +27,9 @@ pub const PackageManager = struct {
 
     fn prompt(self: *PackageManager) !void {
         if (!self.kiss_config.prompt) return;
-        try std.io.getStdOut().writer().print("Continue? Press Enter to continue or Ctrl+C to abort", .{});
+        try std.fs.File.stdout().writeAll("Continue? Press Enter to continue or Ctrl+C to abort");
         var buffer: [1]u8 = undefined;
-        _ = try std.io.getStdIn().readAll(&buffer);
+        _ = try std.fs.File.stdout().readAll(&buffer);
     }
 
     fn find_in_path(self: *PackageManager, pkg_name: []const u8) !types.Package {
@@ -129,8 +129,8 @@ pub const PackageManager = struct {
             }
         }
 
-        var sorted = std.ArrayList([]const u8).init(self.allocator);
-        defer sorted.deinit();
+        var sorted: std.ArrayList([]const u8) = .{};
+        defer sorted.deinit(self.allocator);
 
         try pkg_dag.tsort(ROOT_PKG, &sorted);
 
@@ -182,8 +182,8 @@ pub const PackageManager = struct {
         var installed_pkg_map = std.StringHashMap(types.Package).init(self.allocator);
         defer clear_pkg_map(&installed_pkg_map);
 
-        var candidates = std.ArrayList([]const u8).init(self.allocator);
-        defer candidates.deinit();
+        var candidates: std.ArrayList([]const u8) = .{};
+        defer candidates.deinit(self.allocator);
 
         var it = installed_dir.iterate();
         while (try it.next()) |entry| {
@@ -201,7 +201,7 @@ pub const PackageManager = struct {
             };
 
             if (!std.mem.eql(u8, package.version, repo_pkg.version)) {
-                try candidates.append(package.name);
+                try candidates.append(self.allocator, package.name);
                 std.log.info("{ks} {s} => {s}", .{ package.name, package.version, repo_pkg.version });
             }
         }
@@ -216,8 +216,8 @@ pub const PackageManager = struct {
             try pkg_dag.add_child(ROOT_PKG, try self.construct_dependency_tree(&pkg_map, &installed_pkg_map, &pkg_dag, .SkipInstalledIfSameVersion, pkg));
         }
 
-        var sorted = std.ArrayList([]const u8).init(self.allocator);
-        defer sorted.deinit();
+        var sorted: std.ArrayList([]const u8) = .{};
+        defer sorted.deinit(self.allocator);
 
         try pkg_dag.tsort(ROOT_PKG, &sorted);
 
@@ -277,6 +277,10 @@ pub const PackageManager = struct {
     }
 
     pub fn handle(self: *PackageManager, command: commands.Command) !bool {
+        var stdout_buffer: [1024]u8 = undefined;
+        var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+        const stdout = &stdout_writer.interface;
+
         switch (command) {
             .Alternatives => |alt| {
                 _ = alt;
@@ -338,7 +342,7 @@ pub const PackageManager = struct {
                         var package = try types.Package.new(self.allocator, &pkg_dir);
                         defer package.free();
 
-                        try std.io.getStdOut().writer().print("{s} {s}\n", .{ package.name, package.version });
+                        try stdout.print("{s} {s}\n", .{ package.name, package.version });
                     }
                 } else {
                     for (list.?) |pkg_name| {
@@ -352,7 +356,7 @@ pub const PackageManager = struct {
                         var package = try types.Package.new(self.allocator, &pkg_dir);
                         defer package.free();
 
-                        try std.io.getStdOut().writer().print("{s} {s}\n", .{ package.name, package.version });
+                        try stdout.print("{s} {s}\n", .{ package.name, package.version });
                     }
                 }
             },
@@ -386,7 +390,7 @@ pub const PackageManager = struct {
                         };
 
                         std.posix.access(package, std.posix.F_OK) catch continue;
-                        try std.io.getStdOut().writer().print("{s}/{s}\n", .{ path, package });
+                        try stdout.print("{s}/{s}\n", .{ path, package });
 
                         continue :outer;
                     }
@@ -397,8 +401,10 @@ pub const PackageManager = struct {
             },
             .Update => try self.update(),
             .Upgrade => return try self.upgrade(),
-            .Version => try std.io.getStdOut().writer().print("{s}\n", .{"0.0.1"}),
+            .Version => try stdout.print("{s}\n", .{"0.0.1"}),
         }
+
+        try stdout.flush();
 
         return true;
     }

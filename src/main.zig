@@ -11,7 +11,7 @@ pub const std_options: std.Options = .{
 
 pub fn main() !u8 {
     if (std.os.argv.len < 2) {
-        try std.io.getStdOut().writer().print(
+        try std.fs.File.stdout().writeAll(
             \\-> kiss [a|b|c|d|i|l|p|r|s|u|U|v] [pkg]... 
             \\-> alternatives List and swap alternatives 
             \\-> build        Build packages 
@@ -26,7 +26,7 @@ pub fn main() !u8 {
             \\-> upgrade      Update the system 
             \\-> version      Package manager version 
             \\
-        , .{});
+        );
         std.process.exit(0);
     }
 

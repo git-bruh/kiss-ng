@@ -46,11 +46,15 @@ pub fn log(
     std.debug.lockStdErr();
     defer std.debug.unlockStdErr();
 
-    const stderr = std.io.getStdErr();
-    const writer = stderr.writer();
+    const stderr = std.fs.File.stderr();
+    var buf: [4096]u8 = undefined;
+    var stderr_writer = stderr.writer(&buf);
+    var writer = &stderr_writer.interface;
 
     (if (stderr.supportsAnsiEscapeCodes())
         writer.print(fmt_tty, args)
     else
         writer.print(fmt_clean, args)) catch return;
+
+    writer.flush() catch return;
 }

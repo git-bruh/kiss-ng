@@ -7,8 +7,8 @@ const ProgressData = struct {
     begin: std.time.Instant,
 };
 
-fn data_cb(ptr: [*c]u8, size: usize, nmemb: usize, userdata: *anyopaque) callconv(.C) usize {
-    const file: *std.fs.File = @alignCast(@ptrCast(userdata));
+fn data_cb(ptr: [*c]u8, size: usize, nmemb: usize, userdata: *anyopaque) callconv(.c) usize {
+    const file: *std.fs.File = @ptrCast(@alignCast(userdata));
     const slice: []const u8 = @as([*]u8, @ptrCast(ptr))[0 .. size * nmemb];
     file.writeAll(slice) catch |err| {
         std.log.err("failed to write to file: {}", .{err});
@@ -17,7 +17,7 @@ fn data_cb(ptr: [*c]u8, size: usize, nmemb: usize, userdata: *anyopaque) callcon
     return slice.len;
 }
 
-fn progress_cb(userdata: *anyopaque, dltotal: libcurl.curl_off_t, dlnow: libcurl.curl_off_t, ultotal: libcurl.curl_off_t, ulnow: libcurl.curl_off_t) callconv(.C) i32 {
+fn progress_cb(userdata: *anyopaque, dltotal: libcurl.curl_off_t, dlnow: libcurl.curl_off_t, ultotal: libcurl.curl_off_t, ulnow: libcurl.curl_off_t) callconv(.c) i32 {
     _ = ultotal;
     _ = ulnow;
 
@@ -25,7 +25,7 @@ fn progress_cb(userdata: *anyopaque, dltotal: libcurl.curl_off_t, dlnow: libcurl
     const err = std.posix.system.ioctl(std.c.STDOUT_FILENO, std.posix.T.IOCGWINSZ, @intFromPtr(&winsize));
     if (std.posix.errno(err) != .SUCCESS) winsize.col = 80;
 
-    const data: *ProgressData = @alignCast(@ptrCast(userdata));
+    const data: *ProgressData = @ptrCast(@alignCast(userdata));
     data.printed = true;
 
     const now = std.time.Instant.now() catch unreachable;
@@ -38,22 +38,25 @@ fn progress_cb(userdata: *anyopaque, dltotal: libcurl.curl_off_t, dlnow: libcurl
     var buffer: [512]u8 = undefined;
     const formatted = std.fmt.bufPrint(&buffer, "\r{d} MB  {d:.2} MB/s  {d:02}:{d:02}  ", .{ dltotal >> 20, speed / @as(f64, 1 << 20), @divFloor(time_left, 60), @floor(@mod(time_left, 60)) }) catch unreachable;
 
-    const writer = std.io.getStdOut().writer();
-    writer.writeAll(formatted) catch unreachable;
+    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const stdout = &stdout_writer.interface;
+    stdout.writeAll(formatted) catch unreachable;
 
     const bar_len = winsize.col - formatted.len - "[] 100%".len;
     const bar_to_fill = @as(u64, @intFromFloat(percentage * @as(f64, @floatFromInt(bar_len))));
 
-    writer.writeAll(colors.KISS_COLOR_SECONDARY ++ "[" ++ colors.KISS_COLOR_CLEAR ++ colors.KISS_COLOR_PRIMARY) catch unreachable;
+    stdout.writeAll(colors.KISS_COLOR_SECONDARY ++ "[" ++ colors.KISS_COLOR_CLEAR ++ colors.KISS_COLOR_PRIMARY) catch unreachable;
     for (0..bar_to_fill) |_| {
-        writer.writeAll("#") catch unreachable;
+        stdout.writeAll("#") catch unreachable;
     }
-    writer.writeAll(colors.KISS_COLOR_CLEAR ++ colors.KISS_COLOR_SECONDARY) catch unreachable;
+    stdout.writeAll(colors.KISS_COLOR_CLEAR ++ colors.KISS_COLOR_SECONDARY) catch unreachable;
     for (bar_to_fill..bar_len) |_| {
-        writer.writeAll(".") catch unreachable;
+        stdout.writeAll(".") catch unreachable;
     }
-    writer.writeAll("]" ++ colors.KISS_COLOR_CLEAR) catch unreachable;
-    writer.print(" {d: >3}%", .{@as(u64, @intFromFloat(percentage * 100))}) catch unreachable;
+    stdout.writeAll("]" ++ colors.KISS_COLOR_CLEAR) catch unreachable;
+    stdout.print(" {d: >3}%", .{@as(u64, @intFromFloat(percentage * 100))}) catch unreachable;
+    stdout.flush() catch unreachable;
 
     return 0;
 }
@@ -83,7 +86,7 @@ pub fn download(allocator: std.mem.Allocator, file: std.fs.File, fetch_url: []co
     _ = libcurl.curl_easy_setopt(curl, libcurl.CURLOPT_XFERINFODATA, &data);
 
     const res = libcurl.curl_easy_perform(curl);
-    if (data.printed) std.io.getStdOut().writeAll("\n") catch unreachable;
+    if (data.printed) std.fs.File.stdout().writeAll("\n") catch unreachable;
     if (res != libcurl.CURLE_OK) {
         std.log.err("curl_easy_perform() failed: {ks}", .{libcurl.curl_easy_strerror(res)});
         return false;

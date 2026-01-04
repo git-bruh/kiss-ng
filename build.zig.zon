@@ -37,8 +37,8 @@
     // internet connectivity.
     .dependencies = .{
         .dag_zig = .{
-            .url = "git+https://github.com/git-bruh/dag.zig#1e1148f41afe2bc330cc2bbe6db7735f06ff68c8",
-            .hash = "dag_zig-0.0.0-7j8dpTgzAADJ3UhBNWnN9PUiaONCi6N5VuyRj_iUmPO9",
+            .url = "git+https://codeberg.org/git-bruh/dag.zig#4c0d3b9b7dd2c3a07722d71010ad4b349491ce0f",
+            .hash = "dag_zig-0.0.0-7j8dpfozAABuiNr1rGP4v2MKISTKBYm3v_bu7zLje0oi",
         },
     },
     .paths = .{

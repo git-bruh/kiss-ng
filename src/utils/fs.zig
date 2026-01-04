@@ -105,10 +105,11 @@ pub fn readLink(fd: std.c.fd_t, outBuf: *[std.fs.max_path_bytes]u8) ![]const u8 
     );
 }
 
-pub fn copyFifo(fifo: *std.io.PollFifo, writers: []const *std.fs.File.Writer) !void {
+pub fn copyFifo(fifo: *std.io.Reader, writers: []const *std.io.Writer) !void {
     var buf: [4096]u8 = undefined;
     while (true) {
-        const n = fifo.read(&buf);
+        var bufs: [1][]u8 = .{&buf};
+        const n = try fifo.readVec(&bufs);
         if (n == 0) break;
 
         for (writers) |writer| try writer.writeAll(buf[0..n]);

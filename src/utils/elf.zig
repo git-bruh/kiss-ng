@@ -26,11 +26,11 @@ pub const ElfIterator = struct {
         const allocator = arena.allocator();
         return .{
             .allocator = allocator,
-            .needed_lib_paths = std.ArrayList([]const u8).init(allocator),
-            .static_artifacts = std.ArrayList([]const u8).init(allocator),
-            .dynamic_artifacts = std.ArrayList([]const u8).init(allocator),
+            .needed_lib_paths = .{},
+            .static_artifacts = .{},
+            .dynamic_artifacts = .{},
             .visited_libs = std.StringHashMap(void).init(allocator),
-            .needed_offsets = std.ArrayList(std.elf.Elf64_Addr).init(allocator),
+            .needed_offsets = .{},
             .libs_to_check = std.StringHashMap(void).init(allocator),
         };
     }
@@ -44,7 +44,10 @@ pub const ElfIterator = struct {
         var file = try std.fs.openFileAbsolute(file_name, .{});
         defer file.close();
 
-        const header = std.elf.Header.read(file) catch |err| switch (err) {
+        var reader_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var file_reader = file.reader(&reader_buf);
+
+        const header = std.elf.Header.read(&file_reader.interface) catch |err| switch (err) {
             error.InvalidElfMagic => {
                 // !<arch> for .a files
                 var ar_header: [8]u8 = undefined;
@@ -53,7 +56,7 @@ pub const ElfIterator = struct {
 
                 if (std.mem.eql(u8, &ar_header, "!<arch>\n")) {
                     std.log.info("got static archive {ks}", .{file_name});
-                    try self.static_artifacts.append(file_name);
+                    try self.static_artifacts.append(self.allocator, file_name);
                 }
 
                 return;
@@ -68,20 +71,20 @@ pub const ElfIterator = struct {
             // object files (.o), static libraries (.a)
             // no need to compute dependencies
             .REL => {
-                try self.static_artifacts.append(file_name);
+                try self.static_artifacts.append(self.allocator, file_name);
                 return;
             },
             // binaries
-            .EXEC => try self.dynamic_artifacts.append(file_name),
+            .EXEC => try self.dynamic_artifacts.append(self.allocator, file_name),
             // shared libraries
-            .DYN => try self.dynamic_artifacts.append(file_name),
+            .DYN => try self.dynamic_artifacts.append(self.allocator, file_name),
             else => return,
         }
 
         var load_addr: ?std.elf.Elf64_Addr = null;
         var load_offset: ?std.elf.Elf64_Off = null;
 
-        var prog_it = header.program_header_iterator(file);
+        var prog_it = header.iterateProgramHeaders(&file_reader);
         while (try prog_it.next()) |section| {
             if (section.p_type == std.elf.PT_LOAD) {
                 if (load_addr != null or load_offset != null) continue;
@@ -100,8 +103,8 @@ pub const ElfIterator = struct {
             var idx: u32 = 0;
             while (true) {
                 var dyn_buf: [@sizeOf(std.elf.Elf64_Dyn)]u8 align(@alignOf(std.elf.Elf64_Dyn)) = undefined;
-                try file.seekableStream().seekTo(section.p_offset + (idx * @sizeOf(std.elf.Elf64_Dyn)));
-                try file.reader().readNoEof(&dyn_buf);
+                try file_reader.seekTo(section.p_offset + (idx * @sizeOf(std.elf.Elf64_Dyn)));
+                try file_reader.interface.readSliceAll(&dyn_buf);
 
                 defer idx += 1;
 
@@ -109,7 +112,7 @@ pub const ElfIterator = struct {
                 switch (dyn.d_tag) {
                     std.elf.DT_NULL => break,
                     std.elf.DT_STRTAB => strtab_offset = (load_offset.? + dyn.d_val) - load_addr.?,
-                    std.elf.DT_NEEDED => try self.needed_offsets.append(dyn.d_val),
+                    std.elf.DT_NEEDED => try self.needed_offsets.append(self.allocator, dyn.d_val),
                     std.elf.DT_RPATH => rpath_offset = dyn.d_val,
                     std.elf.DT_RUNPATH => rpath_offset = dyn.d_val,
                     else => {},
@@ -117,24 +120,20 @@ pub const ElfIterator = struct {
             }
 
             if (rpath_offset) |off| {
-                try file.seekableStream().seekTo(strtab_offset.? + off);
+                try file_reader.seekTo(strtab_offset.? + off);
 
-                var buf: [std.fs.max_path_bytes]u8 = undefined;
-                const rpath = try file.reader().readUntilDelimiter(&buf, 0);
-
-                if (!std.mem.eql(u8, rpath, "$ORIGIN") or !std.mem.eql(u8, rpath, "${ORIGIN}")) {
-                    std.log.warn("not checking dependencies for {ks} due to RPATH {ks}", .{ file_name, rpath });
+                const rpath = try file_reader.interface.takeDelimiter(0);
+                if (!std.mem.eql(u8, rpath.?, "$ORIGIN") or !std.mem.eql(u8, rpath.?, "${ORIGIN}")) {
+                    std.log.warn("not checking dependencies for {ks} due to RPATH {ks}", .{ file_name, rpath.? });
                     return;
                 }
             }
 
-            var buf: [std.fs.max_path_bytes]u8 = undefined;
-
             for (self.needed_offsets.items) |off| {
-                try file.seekableStream().seekTo(strtab_offset.? + off);
-                const needed_lib = try file.reader().readUntilDelimiter(&buf, 0);
-                if (self.visited_libs.contains(needed_lib)) continue;
-                try self.libs_to_check.put(try self.allocator.dupe(u8, needed_lib), {});
+                try file_reader.seekTo(strtab_offset.? + off);
+                const needed_lib = try file_reader.interface.takeDelimiter(0);
+                if (self.visited_libs.contains(needed_lib.?)) continue;
+                try self.libs_to_check.put(try self.allocator.dupe(u8, needed_lib.?), {});
             }
 
             if (self.libs_to_check.count() > 0) {
@@ -151,13 +150,11 @@ pub const ElfIterator = struct {
 
                 while (try poller.poll()) {}
 
-                var reader = poller.fifo(.stdout).reader();
+                var reader = poller.reader(.stdout);
 
                 while (true) {
-                    const lib_mapping = sliceUntilWhitespace(reader.readUntilDelimiter(&buf, '\n') catch |err| switch (err) {
-                        error.EndOfStream => break,
-                        else => return err,
-                    });
+                    // takeDelimiter returns null on EOF, so we break
+                    const lib_mapping = sliceUntilWhitespace(try reader.takeDelimiter('\n') orelse break);
 
                     // libzstd.so.1 => /lib/libzstd.so.1 (0x7f33a3d35000)
                     var it = std.mem.splitScalar(u8, lib_mapping, ' ');
@@ -177,11 +174,12 @@ pub const ElfIterator = struct {
                     if (put_res.found_existing) continue;
 
                     // this will be automatically freed with the pool
+                    var buf: [std.fs.max_path_bytes]u8 = undefined;
                     const resolved_path = std.fs.realpath(lib_path, &buf) catch |err| {
                         std.log.err("not able to resolve path {ks}: {}", .{ lib_path, err });
                         continue;
                     };
-                    try self.needed_lib_paths.append(try self.allocator.dupe(u8, resolved_path));
+                    try self.needed_lib_paths.append(self.allocator, try self.allocator.dupe(u8, resolved_path));
                 }
 
                 _ = try lddC.wait();
@@ -251,11 +249,11 @@ pub const ElfIterator = struct {
     }
 
     pub fn free(self: *ElfIterator) void {
-        self.needed_lib_paths.deinit();
-        self.static_artifacts.deinit();
-        self.dynamic_artifacts.deinit();
+        self.needed_lib_paths.deinit(self.allocator);
+        self.static_artifacts.deinit(self.allocator);
+        self.dynamic_artifacts.deinit(self.allocator);
         self.visited_libs.deinit();
-        self.needed_offsets.deinit();
+        self.needed_offsets.deinit(self.allocator);
         self.libs_to_check.deinit();
     }
 };

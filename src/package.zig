@@ -104,11 +104,11 @@ pub const Package = struct {
         const checksums = try read_until_end(allocator, dir, "checksums");
         errdefer if (checksums != null) allocator.free(checksums.?);
 
-        const sourcesArray = try parse_sources(allocator, sliceTillWhitespace(sources orelse ""), sliceTillWhitespace(checksums orelse ""));
-        errdefer sourcesArray.deinit();
+        var sourcesArray = try parse_sources(allocator, sliceTillWhitespace(sources orelse ""), sliceTillWhitespace(checksums orelse ""));
+        errdefer sourcesArray.deinit(allocator);
 
-        const dependencies = try parse_dependencies(allocator, sliceTillWhitespace(depends orelse ""));
-        errdefer dependencies.deinit();
+        var dependencies = try parse_dependencies(allocator, sliceTillWhitespace(depends orelse ""));
+        errdefer dependencies.deinit(allocator);
 
         return Package{
             .name = try allocator.dupe(u8, name),
@@ -179,6 +179,8 @@ pub const Package = struct {
         const checksums = if (generate_checksum) try self.dir.createFile("checksums", .{}) else null;
         defer if (checksums) |f| f.close();
 
+        var buf: [128]u8 = undefined;
+
         for (self.sources.items) |source| switch (source) {
             .Git => |git| {
                 var cache_dir = try config.Config.get_source_dir(self.name, git.build_path);
@@ -222,7 +224,10 @@ pub const Package = struct {
 
                 const b3sum = try checksum.b3sum(file);
                 if (checksums) |f| {
-                    try f.writer().print("{s}\n", .{b3sum});
+                    var f_writer = f.writer(&buf);
+                    var writer = &f_writer.interface;
+                    try writer.print("{s}\n", .{b3sum});
+                    try writer.flush();
                 } else {
                     if (std.mem.eql(u8, &b3sum, http.checksum orelse {
                         std.log.err("no checksum present for file {ks}", .{file_name});
@@ -245,7 +250,10 @@ pub const Package = struct {
 
                 const b3sum = try checksum.b3sum(file);
                 if (checksums) |f| {
-                    try f.writer().print("{s}\n", .{b3sum});
+                    var f_writer = f.writer(&buf);
+                    var writer = &f_writer.interface;
+                    try writer.print("{s}\n", .{b3sum});
+                    try writer.flush();
                 } else {
                     if (std.mem.eql(u8, &b3sum, local.checksum orelse {
                         std.log.err("no checksum present for file {ks}", .{local.path});
@@ -369,10 +377,10 @@ pub const Package = struct {
 
             try self.get_dependencies_file_tree(&arena, kiss_config, &visited_pkgs_map, installed_pkg_map, &files_map);
 
-            var files = std.ArrayList([]const u8).init(arena.allocator());
-            defer files.deinit();
+            var files: std.ArrayList([]const u8) = .{};
+            defer files.deinit(arena.allocator());
 
-            try files.ensureTotalCapacity(files_map.capacity());
+            try files.ensureTotalCapacity(arena.allocator(), files_map.capacity());
 
             var it = files_map.keyIterator();
             while (it.next()) |path| {
@@ -564,7 +572,21 @@ pub const Package = struct {
             return err;
         };
         defer if (etcsums_file != null) etcsums_file.?.close();
-        try Package.generateManifestEtcsums(pkg_dir, null, manifest_file.writer(), if (etcsums_file != null) etcsums_file.?.writer() else null);
+
+        var manifest_buf: [1024]u8 = undefined;
+        var manifest_writer = manifest_file.writer(&manifest_buf);
+        const manifest = &manifest_writer.interface;
+        if (etcsums_file) |file| {
+            var etcsums_buf: [128]u8 = undefined;
+            var etcsums_writer = file.writer(&etcsums_buf);
+            const etcsums = &etcsums_writer.interface;
+
+            try Package.generateManifestEtcsums(pkg_dir, null, manifest, etcsums);
+            try etcsums.flush();
+        } else {
+            try Package.generateManifestEtcsums(pkg_dir, null, manifest, null);
+        }
+        try manifest.flush();
 
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
@@ -572,21 +594,21 @@ pub const Package = struct {
         var installed_files_map = try Package.get_installed_files_map(&arena, kiss_config);
         defer installed_files_map.deinit();
 
-        const dependencies = try Package.walk_elf(self.allocator, &installed_files_map, &self.dependencies, pkg_dir, !no_strip);
-        defer dependencies.deinit();
+        var dependencies = try Package.walk_elf(self.allocator, &installed_files_map, &self.dependencies, pkg_dir, !no_strip);
+        defer dependencies.deinit(self.allocator);
 
         if (dependencies.items.len > 0) {
             const depends = try installed_db_dir.createFile("depends", .{});
             defer depends.close();
 
-            var writer = depends.writer();
-
+            var writer = depends.writer(&buf);
             for (dependencies.items) |dependency| {
                 switch (dependency.kind) {
-                    .Build => try writer.print("{s} make\n", .{dependency.name}),
-                    .Runtime => try writer.print("{s}\n", .{dependency.name}),
+                    .Build => try writer.interface.print("{s} make\n", .{dependency.name}),
+                    .Runtime => try writer.interface.print("{s}\n", .{dependency.name}),
                 }
             }
+            try writer.interface.flush();
         }
 
         var bin_dir = try config.Config.get_bin_dir();
@@ -661,13 +683,18 @@ pub const Package = struct {
         });
         defer poller.deinit();
 
-        var stdoutWriter = std.io.getStdOut().writer();
-        var stderrWriter = std.io.getStdErr().writer();
-        var logWriter = log_file.writer();
+        var stdout_buf: [1024]u8 = undefined;
+        var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
+
+        var stderr_buf: [1024]u8 = undefined;
+        var stderr_writer = std.fs.File.stderr().writer(&stderr_buf);
+
+        var log_buf: [1024]u8 = undefined;
+        var log_writer = log_file.writer(&log_buf);
 
         while (try poller.poll()) {
-            try fs.copyFifo(poller.fifo(.stdout), &.{ &stdoutWriter, &logWriter });
-            try fs.copyFifo(poller.fifo(.stderr), &.{ &stderrWriter, &logWriter });
+            try fs.copyFifo(poller.reader(.stdout), &.{ &stdout_writer.interface, &log_writer.interface });
+            try fs.copyFifo(poller.reader(.stderr), &.{ &stderr_writer.interface, &log_writer.interface });
         }
 
         const term = try child.wait();
@@ -679,7 +706,7 @@ pub const Package = struct {
         return true;
     }
 
-    fn generateManifestEtcsums(dir: std.fs.Dir, skip_path_bytes: ?usize, manifest_writer: std.fs.File.Writer, etcsums_writer: ?std.fs.File.Writer) !void {
+    fn generateManifestEtcsums(dir: std.fs.Dir, skip_path_bytes: ?usize, manifest_writer: *std.io.Writer, etcsums_writer: ?*std.Io.Writer) !void {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
         var dir_name = try fs.readLink(dir.fd, &buf);
         // skip bytes from the parent directory as we only want paths relative to /
@@ -729,8 +756,8 @@ pub const Package = struct {
         var elf_iterator = elf.ElfIterator.new(&arena);
         defer elf_iterator.free();
 
-        var dependencies = try source_dependencies.clone();
-        errdefer dependencies.deinit();
+        var dependencies = try source_dependencies.clone(allocator);
+        errdefer dependencies.deinit(allocator);
 
         try elf_iterator.walk(pkg_dir);
         const needed_lib_paths = try elf_iterator.finalize(strip);
@@ -759,7 +786,7 @@ pub const Package = struct {
 
                 // Otherwise, add the dependency to the list
                 std.log.info("need shared library {ks}, provided by {ks}", .{ path, package });
-                try dependencies.append(.{
+                try dependencies.append(allocator, .{
                     .name = package,
                     .kind = .Runtime,
                 });
@@ -834,8 +861,8 @@ pub const Package = struct {
         const depends = try read_until_end(self.allocator, pkg_dir, "depends");
         defer if (depends != null) self.allocator.free(depends.?);
 
-        const dependencies = try parse_dependencies(self.allocator, sliceTillWhitespace(depends orelse ""));
-        defer dependencies.deinit();
+        var dependencies = try parse_dependencies(self.allocator, sliceTillWhitespace(depends orelse ""));
+        defer dependencies.deinit(self.allocator);
 
         if (dependencies.items.len > 0) {
             var installed_pkg_dir = try kiss_config.get_installed_dir();
@@ -915,7 +942,10 @@ pub const Package = struct {
             var manifest_file = try pkg_dir.createFile("manifest", .{});
             defer manifest_file.close();
 
-            try Package.generateManifestEtcsums(extract_dir, null, manifest_file.writer(), null);
+            var manifest_writer = manifest_file.writer(&buf);
+            var writer = &manifest_writer.interface;
+            try Package.generateManifestEtcsums(extract_dir, null, writer, null);
+            try writer.flush();
 
             self.allocator.free(manifest);
             manifest = try read_until_end(self.allocator, pkg_dir, "manifest") orelse unreachable;
@@ -955,8 +985,8 @@ pub const Package = struct {
             const depends = try read_until_end(self.allocator, pkg_dir, "depends") orelse continue;
             defer self.allocator.free(depends);
 
-            const dependencies = try parse_dependencies(self.allocator, sliceTillWhitespace(depends));
-            defer dependencies.deinit();
+            var dependencies = try parse_dependencies(self.allocator, sliceTillWhitespace(depends));
+            defer dependencies.deinit(self.allocator);
 
             for (dependencies.items) |dependency| {
                 if (dependency.kind == .Build) continue;
@@ -976,8 +1006,8 @@ pub const Package = struct {
         // we must queue all directory symlinks for later removal and only
         // remove them if the symlink is broken to avoid false removals of
         // symlinks /usr/sbin and /usr/lib64
-        var directory_symlinks = std.ArrayList([]const u8).init(self.allocator);
-        defer directory_symlinks.deinit();
+        var directory_symlinks: std.ArrayList([]const u8) = .{};
+        defer directory_symlinks.deinit(self.allocator);
 
         var buf: [std.fs.max_path_bytes]u8 = undefined;
         const pre_remove_hook = try config.Config.get_hook_path(self.name, "pre-remove", &buf);
@@ -1005,7 +1035,7 @@ pub const Package = struct {
                 };
                 dir.close();
                 // if symlink is a directory, deal with it later
-                try directory_symlinks.append(rel_path);
+                try directory_symlinks.append(self.allocator, rel_path);
                 continue;
             }
 
@@ -1061,8 +1091,8 @@ pub const Package = struct {
         for (self.backing_contents) |bytes| {
             if (bytes != null) self.allocator.free(bytes.?);
         }
-        self.dependencies.deinit();
-        self.sources.deinit();
+        self.dependencies.deinit(self.allocator);
+        self.sources.deinit(self.allocator);
         self.dir.close();
     }
 };
@@ -1071,8 +1101,8 @@ fn parse_sources(allocator: std.mem.Allocator, sources: []const u8, checksums: [
     var sourceIter = std.mem.splitScalar(u8, sources, '\n');
     var checksumIter = std.mem.splitScalar(u8, checksums, '\n');
 
-    var sourceArray = std.ArrayList(Source).init(allocator);
-    errdefer sourceArray.deinit();
+    var sourceArray: std.ArrayList(Source) = .{};
+    errdefer sourceArray.deinit(allocator);
 
     while (sourceIter.next()) |sourceBuf| {
         var iter = std.mem.splitScalar(u8, sourceBuf, ' ');
@@ -1096,18 +1126,18 @@ fn parse_sources(allocator: std.mem.Allocator, sources: []const u8, checksums: [
             const cloneUrl = cloneCommitIter.next() orelse unreachable;
             const commitHash = cloneCommitIter.next();
 
-            try sourceArray.append(.{
+            try sourceArray.append(allocator, .{
                 .Git = .{ .build_path = build_path, .clone_url = cloneUrl["git+".len..cloneUrl.len], .commit_hash = commitHash },
             });
             continue;
         }
 
         if (std.mem.containsAtLeast(u8, source, 1, "://")) {
-            try sourceArray.append(.{
+            try sourceArray.append(allocator, .{
                 .Http = .{ .build_path = build_path, .fetch_url = source, .checksum = checksumIter.next() },
             });
         } else {
-            try sourceArray.append(.{
+            try sourceArray.append(allocator, .{
                 .Local = .{ .build_path = build_path, .path = source, .checksum = checksumIter.next() },
             });
         }
@@ -1117,14 +1147,14 @@ fn parse_sources(allocator: std.mem.Allocator, sources: []const u8, checksums: [
 }
 
 fn parse_dependencies(allocator: std.mem.Allocator, depends: []const u8) !std.ArrayList(Dependency) {
-    var dependencies = std.ArrayList(Dependency).init(allocator);
+    var dependencies: std.ArrayList(Dependency) = .{};
 
     var iter = std.mem.splitScalar(u8, depends, '\n');
     while (iter.next()) |dependency| {
         var nameMakeIter = std.mem.splitScalar(u8, dependency, ' ');
         const name = nameMakeIter.next() orelse unreachable;
         if (std.mem.eql(u8, name, "")) continue;
-        try dependencies.append(Dependency{
+        try dependencies.append(allocator, Dependency{
             .name = name,
             .kind = if (nameMakeIter.next() == null) .Runtime else .Build,
         });
