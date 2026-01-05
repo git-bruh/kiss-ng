@@ -693,9 +693,12 @@ pub const Package = struct {
         var log_writer = log_file.writer(&log_buf);
 
         while (try poller.poll()) {
-            try fs.copyFifo(poller.reader(.stdout), &.{ &stdout_writer.interface, &log_writer.interface });
-            try fs.copyFifo(poller.reader(.stderr), &.{ &stderr_writer.interface, &log_writer.interface });
+            try fs.copyToWriters(poller.reader(.stdout), &.{ &stdout_writer.interface, &log_writer.interface });
+            try fs.copyToWriters(poller.reader(.stderr), &.{ &stderr_writer.interface, &log_writer.interface });
         }
+
+        try stdout_writer.interface.flush();
+        try stderr_writer.interface.flush();
 
         const term = try child.wait();
         if (term != .Exited or term.Exited != 0) {
