@@ -1208,7 +1208,7 @@ fn chrootAndExecHook(root: []const u8, path: []const u8) void {
         }
 
         const c_path = std.posix.toPosixPath(path) catch @panic("path too long");
-        std.log.err("failed to execve({s}): {}", .{ path, std.posix.execveZ(&c_path, undefined, undefined) });
+        std.log.err("failed to execve({s}): {}", .{ path, std.posix.execveZ(&c_path, &.{ &c_path, null }, std.c.environ) });
         std.process.exit(1);
     } else {
         var status: u32 = 0;
