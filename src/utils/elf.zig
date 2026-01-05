@@ -154,7 +154,7 @@ pub const ElfIterator = struct {
 
                 while (true) {
                     // takeDelimiter returns null on EOF, so we break
-                    const lib_mapping = sliceUntilWhitespace(try reader.takeDelimiter('\n') orelse break);
+                    const lib_mapping = sliceUntilWhitespace((reader.takeDelimiter('\n') catch break) orelse break);
 
                     // libzstd.so.1 => /lib/libzstd.so.1 (0x7f33a3d35000)
                     var it = std.mem.splitScalar(u8, lib_mapping, ' ');
