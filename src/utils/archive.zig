@@ -47,7 +47,44 @@ fn strip_path_components(path: [*c]const u8) ?[*c]const u8 {
     unreachable;
 }
 
-pub fn extract(dir: std.fs.Dir, file: std.fs.File, strip_components: bool) !void {
+fn open_archive(file: std.fs.File) !?*libarchive.struct_archive {
+    try file.seekTo(0);
+
+    const archive = libarchive.archive_read_new() orelse @panic("archive_read_new() failed");
+    errdefer close_archive(archive);
+
+    try check(archive, libarchive.archive_read_support_format_all(archive));
+    try check(archive, libarchive.archive_read_support_filter_all(archive));
+
+    // default block size from bsdtar
+    try check(archive, libarchive.archive_read_open_fd(archive, file.handle, 20 * 512));
+
+    return archive;
+}
+
+fn close_archive(archive: ?*libarchive.struct_archive) void {
+    if (libarchive.archive_read_free(archive) != libarchive.ARCHIVE_OK) @panic("archive_read_free() failed");
+}
+
+// make sure we only strip components if there is a single top-level directory
+// wrapping the source code, eg. `project-version/{Makefile, ...}`
+// if there is no top-level directory, eg. `a/file,file` mix of files & dirs
+// or multiple top-level directories, extract the archive as-is
+fn should_strip_components(archive: ?*libarchive.struct_archive) !bool {
+    var skipped_count: usize = 0;
+    while (skipped_count < 2) {
+        var entry: ?*libarchive.archive_entry = null;
+        check(archive, libarchive.archive_read_next_header(archive, &entry)) catch |err| switch (err) {
+            ArchiveError.Eof => break,
+            ArchiveError.Retry => continue,
+            else => return err,
+        };
+        if (strip_path_components(libarchive.archive_entry_pathname(entry)) == null) skipped_count += 1;
+    }
+    return skipped_count == 1;
+}
+
+pub fn extract(dir: std.fs.Dir, file: std.fs.File, prefer_strip_components: bool) !void {
     var cwd = try std.fs.cwd().openDir(".", .{});
     defer {
         std.posix.fchdir(cwd.fd) catch |err| std.log.err("failed to change to original dir after extract: {}", .{err});
@@ -55,14 +92,14 @@ pub fn extract(dir: std.fs.Dir, file: std.fs.File, strip_components: bool) !void
     }
     try std.posix.fchdir(dir.fd);
 
-    const archive = libarchive.archive_read_new() orelse @panic("archive_read_new() failed");
-    defer if (libarchive.archive_read_free(archive) != libarchive.ARCHIVE_OK) @panic("archive_read_free() failed");
+    var archive = try open_archive(file);
+    defer close_archive(archive);
 
-    try check(archive, libarchive.archive_read_support_format_all(archive));
-    try check(archive, libarchive.archive_read_support_filter_all(archive));
+    const strip_components = if (prefer_strip_components) try should_strip_components(archive) else false;
+    close_archive(archive);
+    archive = null;
 
-    // default block size from bsdtar
-    try check(archive, libarchive.archive_read_open_fd(archive, file.handle, 20 * 512));
+    archive = try open_archive(file);
 
     while (true) {
         var entry: ?*libarchive.archive_entry = null;
