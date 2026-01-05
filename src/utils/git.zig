@@ -32,12 +32,16 @@ pub fn pull(allocator: std.mem.Allocator, git_dir: std.fs.Dir) !bool {
 }
 
 pub fn initAndPull(allocator: std.mem.Allocator, git_dir: std.fs.Dir, clone_url: []const u8, commit_hash: ?[]const u8) !bool {
-    var status = try spawnAndWait(allocator, &.{ "git", "init" }, git_dir, false);
-    if (status != 0) {
+    const initialized = blk: {
+        git_dir.access(".git", .{}) catch break :blk false;
+        break :blk true;
+    };
+
+    if (!initialized and try spawnAndWait(allocator, &.{ "git", "init" }, git_dir, false) != 0) {
         return false;
     }
 
-    status = try spawnAndWait(allocator, &.{ "git", "remote", "set-url", "origin", clone_url }, git_dir, true);
+    var status = try spawnAndWait(allocator, &.{ "git", "remote", "set-url", "origin", clone_url }, git_dir, true);
     if (status != 0) {
         status = try spawnAndWait(allocator, &.{ "git", "remote", "add", "origin", clone_url }, git_dir, false);
         if (status != 0) {
@@ -50,7 +54,7 @@ pub fn initAndPull(allocator: std.mem.Allocator, git_dir: std.fs.Dir, clone_url:
         return false;
     }
 
-    status = try spawnAndWait(allocator, &.{ "git", "checkout", "FETCH_HEAD" }, git_dir, false);
+    status = try spawnAndWait(allocator, &.{ "git", "reset", "--hard", "FETCH_HEAD" }, git_dir, false);
     if (status != 0) {
         return false;
     }
