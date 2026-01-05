@@ -803,6 +803,16 @@ pub const Package = struct {
         return dependencies;
     }
 
+    pub fn has_existing_binary(self: *const Package) !bool {
+        var bin_dir = try config.Config.get_bin_dir();
+        defer bin_dir.close();
+
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const bin_path = try std.fmt.bufPrint(&buf, "{s}@{s}.tar.zst", .{ self.name, self.version });
+        bin_dir.access(bin_path, .{}) catch return false;
+        return true;
+    }
+
     pub fn install(self: *const Package, kiss_config: *config.Config) !bool {
         signal.block_sigint();
         defer signal.unblock_sigint();
