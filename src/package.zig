@@ -963,10 +963,6 @@ pub const Package = struct {
             self.allocator.free(manifest);
             manifest = try read_until_end(self.allocator, pkg_dir, "manifest") orelse unreachable;
             it = std.mem.splitBackwardsScalar(u8, sliceTillWhitespace(manifest), '\n');
-
-            // TODO handle conflicts during installation
-            std.log.err("not proceeding with installation, found conflicts", .{});
-            return false;
         }
 
         if (system_pkg != null) {
