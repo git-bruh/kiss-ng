@@ -180,6 +180,7 @@ pub const Package = struct {
         defer if (checksums) |f| f.close();
 
         var buf: [128]u8 = undefined;
+        var writer = if (checksums) |f| f.writer(&buf) else null;
 
         for (self.sources.items) |source| switch (source) {
             .Git => |git| {
@@ -223,11 +224,9 @@ pub const Package = struct {
                 std.log.info("found remote file {ks}", .{file_name});
 
                 const b3sum = try checksum.b3sum(file);
-                if (checksums) |f| {
-                    var f_writer = f.writer(&buf);
-                    var writer = &f_writer.interface;
-                    try writer.print("{s}\n", .{b3sum});
-                    try writer.flush();
+                if (writer) |*w| {
+                    try w.interface.print("{s}\n", .{b3sum});
+                    try w.interface.flush();
                 } else {
                     if (std.mem.eql(u8, &b3sum, http.checksum orelse {
                         std.log.err("no checksum present for file {ks}", .{file_name});
@@ -249,11 +248,9 @@ pub const Package = struct {
                 std.log.info("found local file {ks}", .{local.path});
 
                 const b3sum = try checksum.b3sum(file);
-                if (checksums) |f| {
-                    var f_writer = f.writer(&buf);
-                    var writer = &f_writer.interface;
-                    try writer.print("{s}\n", .{b3sum});
-                    try writer.flush();
+                if (writer) |*w| {
+                    try w.interface.print("{s}\n", .{b3sum});
+                    try w.interface.flush();
                 } else {
                     if (std.mem.eql(u8, &b3sum, local.checksum orelse {
                         std.log.err("no checksum present for file {ks}", .{local.path});
