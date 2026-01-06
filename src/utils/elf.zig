@@ -1,6 +1,27 @@
 const std = @import("std");
 const fs = @import("./fs.zig");
 
+// files owned by libc
+const EXCLUDED_LIBS: []const []const u8 = &.{
+    "ld-",
+    "libc.so",
+    "libm.so",
+    "libc++.so",
+    "libc++abi.so",
+    "libcrypt.so",
+    "libdl.so",
+    "libgcc_s.so",
+    "libmvec.so",
+    "libpthread.so",
+    "libresolv.so",
+    "librt.so",
+    "libstdc++.so",
+    "libtrace.so",
+    "libunwind.so",
+    "libutil.so",
+    "libxnet.so",
+};
+
 /// iterates over all ELF files in the directory structure
 pub const ElfIterator = struct {
     allocator: std.mem.Allocator,
@@ -152,7 +173,7 @@ pub const ElfIterator = struct {
 
                 var reader = poller.reader(.stdout);
 
-                while (true) {
+                blk: while (true) {
                     // takeDelimiter returns null on EOF, so we break
                     const lib_mapping = sliceUntilWhitespace((reader.takeDelimiter('\n') catch break) orelse break);
 
@@ -166,6 +187,9 @@ pub const ElfIterator = struct {
                     const lib_path = it.next() orelse continue;
                     if (lib_path.len == 0 or lib_path[0] != '/') continue;
 
+                    const basename = std.fs.path.basename(lib_path);
+                    for (EXCLUDED_LIBS) |lib| if (std.mem.startsWith(u8, basename, lib)) continue :blk;
+
                     // we only want to consider DT_NEEDED dependencies, not transitive ones
                     if (self.libs_to_check.get(lib_name) == null) continue;
 
@@ -175,11 +199,15 @@ pub const ElfIterator = struct {
 
                     // this will be automatically freed with the pool
                     var buf: [std.fs.max_path_bytes]u8 = undefined;
-                    const resolved_path = std.fs.realpath(lib_path, &buf) catch |err| {
+                    // only resolve the directory symlinks, not file because
+                    // we don't want to resolve the ABI SONAME
+                    // eg. we want /lib/libtinfow.so.6 -> /usr/lib/libtinfow.so.6
+                    // NOT /lib/libtinfow.so.6 -> /usr/lib/libtinfow.so.6.6
+                    const resolved_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ std.fs.realpath(std.fs.path.dirname(lib_path) orelse unreachable, &buf) catch |err| {
                         std.log.err("not able to resolve path {ks}: {}", .{ lib_path, err });
                         continue;
-                    };
-                    try self.needed_lib_paths.append(self.allocator, try self.allocator.dupe(u8, resolved_path));
+                    }, basename });
+                    try self.needed_lib_paths.append(self.allocator, resolved_path);
                 }
 
                 _ = try lddC.wait();
