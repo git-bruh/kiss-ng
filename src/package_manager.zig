@@ -136,9 +136,6 @@ pub const PackageManager = struct {
 
         if (sorted.items.len == 0) return true;
 
-        var it = pkg_map.valueIterator();
-        while (it.next()) |pkg| if (!try pkg.download_and_verify(false)) return false;
-
         var requires_implicit_packages = false;
         for (sorted.items[0 .. sorted.items.len - 1], 0..) |item, idx| {
             const pkg = pkg_map.get(item) orelse unreachable;
@@ -148,6 +145,7 @@ pub const PackageManager = struct {
             } else {
                 std.log.info("({d}/{d}) will build package (explicit) {ks}", .{ idx + 1, sorted.items.len - 1, pkg.name });
             }
+            if (!try pkg.download_and_verify(false)) return false;
         }
         if (requires_implicit_packages) try self.prompt();
 
