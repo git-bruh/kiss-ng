@@ -1157,9 +1157,9 @@ fn parse_dependencies(allocator: std.mem.Allocator, depends: []const u8) !std.Ar
 
     var iter = std.mem.splitScalar(u8, depends, '\n');
     while (iter.next()) |dependency| {
-        var nameMakeIter = std.mem.splitScalar(u8, dependency, ' ');
+        if (std.mem.eql(u8, dependency, "")) continue;
+        var nameMakeIter = std.mem.tokenizeAny(u8, dependency, &.{ ' ', '\t' });
         const name = nameMakeIter.next() orelse unreachable;
-        if (std.mem.eql(u8, name, "")) continue;
         try dependencies.append(allocator, Dependency{
             .name = name,
             .kind = if (nameMakeIter.next() == null) .Runtime else .Build,
