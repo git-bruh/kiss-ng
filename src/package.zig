@@ -415,7 +415,9 @@ pub const Package = struct {
                         std.log.warn("path {ks} already exists (likely due to symlink)", .{path});
                     };
                 } else {
-                    try std.posix.linkat(-1, path, sysroot_dir.fd, path[1..path.len], 0);
+                    std.posix.linkat(-1, path, sysroot_dir.fd, path[1..path.len], 0) catch |err| {
+                        if (err == error.NotSameFileSystem) std.log.warn("path {ks} is on a different filesystem, not including in sandbox", .{path}) else return err;
+                    };
                 }
             }
 
