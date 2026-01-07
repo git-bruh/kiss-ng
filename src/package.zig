@@ -1051,7 +1051,7 @@ pub const Package = struct {
                     // been deleted as part of the removal process for another
                     // package because there is no exclusivity of directory
                     // ownership
-                    if (err == error.DirNotEmpty or err == error.FileNotFound) continue;
+                    if (err == error.DirNotEmpty or err == error.FileNotFound or err == error.FileBusy) continue;
                     std.log.err("failed to deleteDir({s}): {}", .{ rel_path, err });
                     return false;
                 };
