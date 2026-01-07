@@ -217,7 +217,7 @@ pub fn is_extractable(path: []const u8) bool {
                 // file.tar
                 std.mem.eql(u8, ext, "tar") or
                     // file.tar.{gz,zst,...}
-                    std.mem.eql(u8, last_component orelse "", "tar") or
+                    (std.mem.eql(u8, last_component orelse "", "tar") and ext.len <= 3) or
                     // file.t{g,...}z
                     (ext.len == 3 and ext[0] == 't' and ext[2] == 'z'));
         }
