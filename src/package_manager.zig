@@ -152,7 +152,7 @@ pub const PackageManager = struct {
         for (sorted.items[0 .. sorted.items.len - 1], 0..) |item, idx| {
             const pkg = pkg_map.get(item) orelse unreachable;
 
-            if (try pkg.has_existing_binary()) {
+            if (pkg.implicit and try pkg.has_existing_binary()) {
                 std.log.info("({d}/{d}) installing existing binary for package {ks}", .{ idx + 1, sorted.items.len - 1, pkg.name });
                 if (!try pkg.install(&self.kiss_config)) return false;
                 continue;
