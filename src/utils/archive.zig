@@ -79,9 +79,15 @@ fn should_strip_components(archive: ?*libarchive.struct_archive) !bool {
             ArchiveError.Retry => continue,
             else => return err,
         };
-        if (strip_path_components(libarchive.archive_entry_pathname(entry)) == null) skipped_count += 1;
+        const path = libarchive.archive_entry_pathname(entry);
+        var idx: usize = 0;
+        var slash_count: usize = 0;
+        while (path[idx] != 0) : (idx += 1) {
+            if (path[idx] == '/') slash_count += 1;
+        }
+        if (slash_count == 0 or (idx > 0 and slash_count == 1 and path[idx - 1] == '/')) skipped_count += 1;
     }
-    return skipped_count == 1;
+    return skipped_count <= 1;
 }
 
 pub fn extract(dir: std.fs.Dir, file: std.fs.File, prefer_strip_components: bool) !void {
