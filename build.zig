@@ -3,7 +3,7 @@ const std = @import("std");
 // Although this function looks imperative, note that its job is to
 // declaratively construct a build graph that will be executed by an external
 // runner.
-pub fn build(b: *std.Build) void {
+pub fn build(b: *std.Build) !void {
     // Standard target options allows the person running `zig build` to choose
     // what target to build for. Here we do not override the defaults, which
     // means any target is allowed, and the default is native. Other options
@@ -15,6 +15,8 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
+    const static = b.option(bool, "static", "build static binary") orelse false;
+
     // We will also create a module for our other entry point, 'main.zig'.
     const exe_mod = b.createModule(.{
         // `root_source_file` is the Zig "entry point" of the module. If a module
@@ -24,6 +26,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
 
     // This creates another `std.Build.Step.Compile`, but this one builds an executable
@@ -31,11 +34,32 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{
         .name = "kiss_ng",
         .root_module = exe_mod,
+        .linkage = if (static) .static else null,
     });
-    exe.linkSystemLibrary("c");
-    exe.linkSystemLibrary("blake3");
-    exe.linkSystemLibrary("curl");
-    exe.linkSystemLibrary("archive");
+
+    const libs: []const []const u8 = &.{ "blake3", "curl", "archive" };
+    if (exe.linkage == .static) {
+        var buf: [255]u8 = undefined;
+        for (libs) |lib| {
+            const lib_name = try std.fmt.bufPrint(&buf, "lib{s}", .{lib});
+
+            var out_code: u8 = undefined;
+            const lib_path = b.runAllowFail(&.{ "pkg-config", "--variable=libdir", lib_name }, &out_code, .Ignore) catch |err| {
+                if (err == error.ExitCodeFailure) {
+                    exe_mod.addObjectFile(.{ .cwd_relative = try std.fmt.bufPrint(&buf, "{s}/lib{s}.a", .{ "/usr/lib", lib }) });
+                    continue;
+                }
+                return err;
+            };
+
+            const link_libs = b.runAllowFail(&.{ "pkg-config", "--static", "--libs", lib_name }, &out_code, .Ignore) catch unreachable;
+
+            var it = std.mem.splitScalar(u8, link_libs[0 .. link_libs.len - 1], ' ');
+            while (it.next()) |obj| if (!std.mem.eql(u8, obj, "-pthread")) exe_mod.addObjectFile(.{ .cwd_relative = try std.fmt.bufPrint(&buf, "{s}/lib{s}.a", .{ lib_path[0 .. lib_path.len - 1], obj[2..obj.len] }) });
+        }
+    } else {
+        for (libs) |lib| exe_mod.linkSystemLibrary(lib, .{});
+    }
 
     const dag_zig = b.dependency("dag_zig", .{
         .target = target,
