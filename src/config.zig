@@ -202,5 +202,6 @@ pub const Config = struct {
     pub fn free(self: *Config) void {
         self.allocator.free(self.path);
         if (self.root != null) self.allocator.free(self.root.?);
+        if (self.tmpdir != null) self.allocator.free(self.tmpdir.?);
     }
 };
