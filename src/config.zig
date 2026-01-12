@@ -16,9 +16,6 @@ pub const Config = struct {
     /// KISS_ROOT
     /// path for installing KISS packages
     root: ?[]const u8,
-    /// KISS_TMPDIR
-    /// base directory for temporary build trees
-    tmpdir: ?[]const u8,
 
     /// KISS_DEBUG
     /// whether to preserve build directory for debugging
@@ -51,12 +48,6 @@ pub const Config = struct {
         });
         errdefer allocator.free(path);
 
-        const tmpdir = std.process.getEnvVarOwned(allocator, "KISS_TMPDIR") catch |err| switch (err) {
-            error.EnvironmentVariableNotFound => null,
-            else => return err,
-        };
-        errdefer if (tmpdir != null) allocator.free(tmpdir.?);
-
         const debug = std.posix.getenv("KISS_DEBUG");
         const strip = std.posix.getenv("KISS_STRIP");
         const prompt = std.posix.getenv("KISS_PROMPT");
@@ -67,7 +58,6 @@ pub const Config = struct {
             .allocator = allocator,
             .path = path,
             .root = root,
-            .tmpdir = tmpdir,
             // defaults to false
             .debug = (debug != null and debug.?[0] == '1'),
             // defaults to true
@@ -142,23 +132,23 @@ pub const Config = struct {
         }
     }
 
-    pub fn get_proc_build_dir(self: *const Config) !std.fs.Dir {
+    pub fn get_proc_build_dir() !std.fs.Dir {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const path = try std.fmt.bufPrint(&buf, "{s}/{d}/build", .{ self.tmpdir orelse (CACHE_PATH ++ "/proc"), std.os.linux.getpid() });
+        const path = try std.fmt.bufPrint(&buf, "{s}/{d}/build", .{ CACHE_PATH ++ "/proc", std.os.linux.getpid() });
 
         return try fs.mkdirParents(null, path);
     }
 
-    pub fn get_proc_pkg_dir(self: *const Config) !std.fs.Dir {
+    pub fn get_proc_pkg_dir() !std.fs.Dir {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const path = try std.fmt.bufPrint(&buf, "{s}/{d}/pkg", .{ self.tmpdir orelse (CACHE_PATH ++ "/proc"), std.os.linux.getpid() });
+        const path = try std.fmt.bufPrint(&buf, "{s}/{d}/pkg", .{ CACHE_PATH ++ "/proc", std.os.linux.getpid() });
 
         return try fs.mkdirParents(null, path);
     }
 
-    pub fn get_proc_sysroot_dir(self: *const Config) !std.fs.Dir {
+    pub fn get_proc_sysroot_dir() !std.fs.Dir {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const path = try std.fmt.bufPrint(&buf, "{s}/{d}/sysroot", .{ self.tmpdir orelse (CACHE_PATH ++ "/proc"), std.os.linux.getpid() });
+        const path = try std.fmt.bufPrint(&buf, "{s}/{d}/sysroot", .{ CACHE_PATH ++ "/proc", std.os.linux.getpid() });
 
         return try fs.mkdirParents(null, path);
     }
@@ -166,7 +156,7 @@ pub const Config = struct {
     // cleans build & package directories
     pub fn rm_proc_dir(self: *const Config) !void {
         if (!self.debug) {
-            var dir = try std.fs.openDirAbsolute(self.tmpdir orelse (CACHE_PATH ++ "/proc"), .{});
+            var dir = try std.fs.openDirAbsolute(CACHE_PATH ++ "/proc", .{});
             defer dir.close();
 
             var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -202,6 +192,5 @@ pub const Config = struct {
     pub fn free(self: *Config) void {
         self.allocator.free(self.path);
         if (self.root != null) self.allocator.free(self.root.?);
-        if (self.tmpdir != null) self.allocator.free(self.tmpdir.?);
     }
 };

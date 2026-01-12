@@ -348,18 +348,18 @@ pub const Package = struct {
         // write access for logging
         try landlock.add_rule_at_path(config.CACHE_PATH ++ "/logs", sandbox.Permissions.Write);
         // write & execute access for building projects
-        try landlock.add_rule_at_path(kiss_config.tmpdir orelse config.CACHE_PATH ++ "/proc", sandbox.Permissions.Read | sandbox.Permissions.Write | sandbox.Permissions.Execute);
+        try landlock.add_rule_at_path(config.CACHE_PATH ++ "/proc", sandbox.Permissions.Read | sandbox.Permissions.Write | sandbox.Permissions.Execute);
         // read & execute access for repository dir (executing build script)
         try landlock.add_rule_with_children(self.dir.fd, sandbox.Permissions.Read | sandbox.Permissions.Execute);
 
-        var sysroot_dir = try kiss_config.get_proc_sysroot_dir();
+        var sysroot_dir = try config.Config.get_proc_sysroot_dir();
         defer sysroot_dir.close();
 
         var buf: [std.fs.max_path_bytes]u8 = undefined;
         const sysroot_dir_path = try fs.readLink(sysroot_dir.fd, &buf);
 
         var inBuf: [std.fs.max_path_bytes]u8 = undefined;
-        const build_file_path = try self.copyBuildScript(kiss_config.tmpdir orelse (config.CACHE_PATH ++ "/proc"), &inBuf);
+        const build_file_path = try self.copyBuildScript(config.CACHE_PATH ++ "/proc", &inBuf);
 
         // allow access to read all files provided by dependencies
         {
@@ -456,7 +456,7 @@ pub const Package = struct {
             try landlock.enforce();
         }
 
-        var build_dir = try kiss_config.get_proc_build_dir();
+        var build_dir = try config.Config.get_proc_build_dir();
         defer build_dir.close();
 
         // must extract sources before unshare() + chroot() as we have to access
@@ -514,7 +514,7 @@ pub const Package = struct {
             return;
         }
 
-        var pkg_dir = try kiss_config.get_proc_pkg_dir();
+        var pkg_dir = try config.Config.get_proc_pkg_dir();
         defer pkg_dir.close();
 
         var log_dir = try config.Config.get_log_dir();
@@ -523,7 +523,7 @@ pub const Package = struct {
         var log_file = try config.Config.get_proc_log_file(log_dir, self.name);
         defer log_file.close();
 
-        var chrooted_build_dir = try kiss_config.get_proc_build_dir();
+        var chrooted_build_dir = try config.Config.get_proc_build_dir();
         defer chrooted_build_dir.close();
 
         // create empty /var/db/kiss/installed in build directory

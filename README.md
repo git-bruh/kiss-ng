@@ -78,4 +78,4 @@ $ kiss_ng
   - ~~[ ] `KISS_HOOK`~~ not planned
   - [x] `KISS_KEEPLOG`
   - [x] `KISS_PROMPT`
-  - [x] `KISS_TMPDIR`
+  - ~~[ ] `KISS_TMPDIR`~~ does not fit with sandboxing logic
