@@ -1070,14 +1070,19 @@ pub const Package = struct {
             var dir = root_dir.openDir(path, .{}) catch |err| {
                 if (err == error.FileNotFound) {
                     try root_dir.deleteFile(path);
-                    // try deleting the parent directory as-well if this was
+                    // try deleting the parent directories as-well if this was
                     // the last file in the directory
-                    const parent_dir_end = std.mem.lastIndexOfScalar(u8, path, '/') orelse unreachable;
-                    root_dir.deleteDir(path[0..parent_dir_end]) catch |dir_err| {
-                        if (dir_err == error.DirNotEmpty) continue;
-                        return dir_err;
-                    };
-
+                    // if we don't loop then only one level of empty directories is cleared in cases like this:
+                    //   - /usr/lib/modules/6.18.4/build/scripts/dtc/include-prefixes/dt-bindings (symlink)
+                    //   - /usr/lib/modules/6.18.4/build/scripts/dtc/ (directory)
+                    var parent_dir_end = std.mem.lastIndexOfScalar(u8, path, '/') orelse unreachable;
+                    while (parent_dir_end > 0) {
+                        root_dir.deleteDir(path[0..parent_dir_end]) catch |dir_err| {
+                            if (dir_err == error.DirNotEmpty) break;
+                            return dir_err;
+                        };
+                        parent_dir_end = std.mem.lastIndexOfScalar(u8, path[0..parent_dir_end], '/') orelse break;
+                    }
                     continue;
                 }
                 return err;
