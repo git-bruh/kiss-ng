@@ -1031,7 +1031,13 @@ pub const Package = struct {
             const rel_path = path[1..if (is_dir) path.len - 1 else path.len];
 
             // checking for directory symlinks only works if we omit the trailing slash
-            const stat = try std.posix.fstatat(root_dir.fd, rel_path, std.c.AT.SYMLINK_NOFOLLOW);
+            const stat = std.posix.fstatat(root_dir.fd, rel_path, std.c.AT.SYMLINK_NOFOLLOW) catch |err| {
+                if (err == error.FileNotFound) {
+                    std.log.err("failed to fstatat({s}): {}", .{ rel_path, err });
+                    continue;
+                }
+                return err;
+            };
             if ((stat.mode & std.c.S.IFMT) == std.c.S.IFLNK) {
                 var dir = root_dir.openDir(rel_path, .{}) catch |err| {
                     if (err == error.NotDir or err == error.FileNotFound) {
