@@ -1008,6 +1008,9 @@ pub const Package = struct {
         const manifest = try read_until_end(self.allocator, self.dir, "manifest") orelse @panic("installed pkg has no manifest");
         defer self.allocator.free(manifest);
 
+        const etcsums = try read_until_end(self.allocator, self.dir, "etcsums");
+        defer if (etcsums != null) self.allocator.free(etcsums.?);
+
         var root_dir = try std.fs.openDirAbsolute(kiss_config.root orelse "/", .{});
         defer root_dir.close();
 
@@ -1022,6 +1025,8 @@ pub const Package = struct {
         chrootAndExecHook(kiss_config.root orelse "/", pre_remove_hook);
 
         var it = std.mem.splitScalar(u8, manifest, '\n');
+        var etcsums_it = std.mem.splitScalar(u8, etcsums orelse "", '\n');
+
         while (it.next()) |path| {
             if (path.len <= 1) continue;
 
@@ -1041,6 +1046,10 @@ pub const Package = struct {
             if ((stat.mode & std.c.S.IFMT) == std.c.S.IFLNK) {
                 var dir = root_dir.openDir(rel_path, .{}) catch |err| {
                     if (err == error.NotDir or err == error.FileNotFound) {
+                        if (std.mem.startsWith(u8, path, "/etc")) {
+                            std.log.info("unconditionally removing /etc symlink {s}", .{rel_path});
+                            _ = etcsums_it.next();
+                        }
                         try root_dir.deleteFile(rel_path);
                         continue;
                     }
@@ -1064,6 +1073,23 @@ pub const Package = struct {
                     return false;
                 };
             } else {
+                if (std.mem.startsWith(u8, path, "/etc")) {
+                    if (etcsums_it.next()) |etcsum| {
+                        const file = root_dir.openFile(rel_path, .{}) catch |err| {
+                            std.log.warn("failed to openFile({s}) for checksum, skipping removal: {}", .{ rel_path, err });
+                            continue;
+                        };
+                        const b3sum = try checksum.b3sum(file);
+                        if (!std.mem.eql(u8, etcsum, &b3sum)) {
+                            std.log.info("file {s} is modified, skipping removal", .{rel_path});
+                            continue;
+                        }
+                    } else {
+                        std.log.err("etcsums iterator exhausted for file {s}, skipping removal", .{rel_path});
+                        continue;
+                    }
+                }
+
                 root_dir.deleteFile(rel_path) catch |err| {
                     std.log.err("failed to deleteFile({s}): {}", .{ rel_path, err });
                     return false;
