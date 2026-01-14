@@ -843,17 +843,52 @@ pub const Package = struct {
         defer if (system_pkg != null) system_pkg.?.free();
         var system_manifest: ?[]const u8 = null;
         defer if (system_manifest != null) self.allocator.free(system_manifest.?);
+        var system_etcsums: ?[]const u8 = null;
+        defer if (system_etcsums != null) self.allocator.free(system_etcsums.?);
 
         var installed_files_map = std.StringHashMap(void).init(self.allocator);
         defer installed_files_map.deinit();
+
+        var etcsums_map = std.StringHashMap(struct {
+            package_etcsum: [checksum.B3SUM_LEN * 2]u8,
+            system_etcsum: [checksum.B3SUM_LEN * 2]u8,
+        }).init(self.allocator);
+        defer etcsums_map.deinit();
+
+        var root_dir = try std.fs.openDirAbsolute(kiss_config.root orelse "/", .{});
+        defer root_dir.close();
 
         if (system_pkg != null) {
             system_manifest = try read_until_end(self.allocator, system_pkg.?.dir, "manifest") orelse {
                 std.log.err("no manifest found for installed package {ks}", .{self.name});
                 return false;
             };
+            system_etcsums = try read_until_end(self.allocator, system_pkg.?.dir, "etcsums");
+            var etcsums_it = std.mem.splitScalar(u8, system_etcsums.?, '\n');
             var it = std.mem.splitScalar(u8, sliceTillWhitespace(system_manifest.?), '\n');
-            while (it.next()) |path| try installed_files_map.putNoClobber(path, {});
+            while (it.next()) |path| {
+                if (std.mem.startsWith(u8, path, "/etc")) {
+                    const rel_path = path[1..];
+                    const stat = try root_dir.statFile(rel_path);
+                    if (stat.kind == .directory) continue;
+
+                    const package_etcsum = etcsums_it.next() orelse {
+                        std.log.err("no etcsums found for file {s}", .{path});
+                        return false;
+                    };
+                    const file = try root_dir.openFile(if (stat.kind == .file) rel_path else "/dev/null", .{});
+                    defer file.close();
+                    const system_etcsum = try checksum.b3sum(file);
+                    try etcsums_map.putNoClobber(path, .{
+                        .package_etcsum = undefined,
+                        .system_etcsum = undefined,
+                    });
+                    const etcsum = etcsums_map.getPtr(path) orelse unreachable;
+                    @memcpy(&etcsum.package_etcsum, package_etcsum);
+                    @memcpy(&etcsum.system_etcsum, &system_etcsum);
+                }
+                try installed_files_map.putNoClobber(path, {});
+            }
         }
 
         // first extract the binary package as-is and then inspect dependencies
@@ -866,9 +901,6 @@ pub const Package = struct {
 
         var pkg_dir = try db_dir.openDir(self.name, .{});
         defer pkg_dir.close();
-
-        var root_dir = try std.fs.openDirAbsolute(kiss_config.root orelse "/", .{});
-        defer root_dir.close();
 
         const depends = try read_until_end(self.allocator, pkg_dir, "depends");
         defer if (depends != null) self.allocator.free(depends.?);
@@ -933,17 +965,14 @@ pub const Package = struct {
                 continue;
             }
 
-            if (std.mem.startsWith(u8, path, "/etc")) {
-                std.log.err("conflicting /etc file at {ks}", .{path});
-                return false;
-            }
+            if (std.mem.startsWith(u8, path, "/etc")) continue;
 
             try fs.ensureDir(extract_dir.makeDir(config.DB_PATH_CHOICES));
 
             const path_copy = try std.fmt.bufPrint(&buf, "{s}", .{rel_path});
             std.mem.replaceScalar(u8, path_copy, '/', '>');
-            var choice_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const choice_path = try std.fmt.bufPrint(&choice_buf, "{s}/{s}>{s}", .{ config.DB_PATH_CHOICES, self.name, path_copy });
+            var choice_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const choice_path = try std.fmt.bufPrint(&choice_path_buf, "{s}/{s}>{s}", .{ config.DB_PATH_CHOICES, self.name, path_copy });
             std.log.info("path {ks} exists both in system and in package, renaming to {ks}{ks}", .{ path, "/", choice_path });
             try extract_dir.rename(rel_path, choice_path);
             regenerate_manifest = true;
@@ -962,6 +991,33 @@ pub const Package = struct {
             self.allocator.free(manifest);
             manifest = try read_until_end(self.allocator, pkg_dir, "manifest") orelse unreachable;
             it = std.mem.splitBackwardsScalar(u8, sliceTillWhitespace(manifest), '\n');
+        }
+
+        it.reset();
+        // we do this after regeneration of the manifest as .new files shouldn't be part of it
+        while (it.next()) |path| {
+            if (!std.mem.startsWith(u8, path, "/etc")) continue;
+            const rel_path = path[1..];
+            const stat = try extract_dir.statFile(rel_path);
+            const etcsums = etcsums_map.get(path) orelse {
+                std.log.info("etc path {ks} not in existing etcsums, does not conflict", .{path});
+                continue;
+            };
+            const file = try extract_dir.openFile(if (stat.kind == .file) rel_path else "/dev/null", .{});
+            defer file.close();
+            const etcsum = try checksum.b3sum(file);
+            if (std.mem.eql(u8, &etcsums.package_etcsum, &etcsums.system_etcsum)) {
+                // package = X, system = X, new = X (unmodified)
+                //   OR
+                // package = X, system = X, new = Y (unmodified, but file to be installed is updated)
+                continue;
+            } else if (std.mem.eql(u8, &etcsums.system_etcsum, &etcsum)) {
+                // package = X, system = Y, new = Y (modified, but file to be installed is same)
+                continue;
+            }
+            std.log.info("etc path {ks} is modified, saving as {s}.new", .{ path, path });
+            var new_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+            try extract_dir.rename(rel_path, try std.fmt.bufPrint(&new_path_buf, "{s}.new", .{rel_path}));
         }
 
         if (system_pkg != null) {
@@ -1079,6 +1135,7 @@ pub const Package = struct {
                             std.log.warn("failed to openFile({s}) for checksum, skipping removal: {}", .{ rel_path, err });
                             continue;
                         };
+                        defer file.close();
                         const b3sum = try checksum.b3sum(file);
                         if (!std.mem.eql(u8, etcsum, &b3sum)) {
                             std.log.info("file {s} is modified, skipping removal", .{rel_path});

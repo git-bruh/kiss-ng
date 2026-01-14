@@ -47,8 +47,8 @@ $ kiss_ng
   - [ ] parallel downloads
 
 - [x] install
-  - [ ] conflicts
-    - [ ] etcsums
+  - [x] conflicts
+    - [x] etcsums
     - [x] files
 
 - [x] list
@@ -64,18 +64,18 @@ $ kiss_ng
 - [x] hooks (package-specified only, no user hooks)
   - [x] pre-remove
   - [x] post-install
-  - ~~[ ] user hooks~~ not planned
+  - [x] ~~user hooks~~ not planned
 
 - [x] global lock for installation/removal
 
 - [x] environment variables
   - [x] `KISS_ROOT`
-  - ~~[ ] `KISS_COMPRESS`~~ `zstd` compression by default
+  - [x] ~~`KISS_COMPRESS`~~ `zstd` compression by default
   - [x] `KISS_PATH`
-  - ~~[ ] `KISS_COLOR`~~ not planned
+  - [x] ~~`KISS_COLOR`~~ not planned
   - [x] `KISS_DEBUG`
   - [x] `KISS_FORCE`
-  - ~~[ ] `KISS_HOOK`~~ not planned
+  - [x] ~~`KISS_HOOK`~~ not planned
   - [x] `KISS_KEEPLOG`
   - [x] `KISS_PROMPT`
-  - ~~[ ] `KISS_TMPDIR`~~ does not fit with sandboxing logic
+  - [x] ~~`KISS_TMPDIR`~~ does not fit with sandboxing logic

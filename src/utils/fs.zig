@@ -53,7 +53,7 @@ pub fn copyDir(src_dir: std.fs.Dir, target_dir: std.fs.Dir) !void {
 pub fn copyStructure(src_dir: std.fs.Dir, target_dir: std.fs.Dir, paths: anytype) !void {
     while (paths.next()) |path| {
         // the caller must verify that the path entries are valid
-        const rel_path = path[1..path.len];
+        var rel_path: []const u8 = path[1..path.len];
 
         // ignore directory if it exists in the system, otherwise create one
         // with the same permissions
@@ -70,10 +70,18 @@ pub fn copyStructure(src_dir: std.fs.Dir, target_dir: std.fs.Dir, paths: anytype
             continue;
         }
 
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+
         // we can't copy symlinks
-        const stat = try std.posix.fstatat(src_dir.fd, rel_path, std.c.AT.SYMLINK_NOFOLLOW);
+        const stat = std.posix.fstatat(src_dir.fd, rel_path, std.c.AT.SYMLINK_NOFOLLOW) catch |err| {
+            if (err != error.FileNotFound) return err;
+            // we can have renamed files in /etc that we should install with the .new suffix
+            rel_path = try std.fmt.bufPrint(&buf, "{s}.new", .{rel_path});
+            src_dir.access(rel_path, .{}) catch return err;
+            try copyFile(src_dir, rel_path, target_dir);
+            continue;
+        };
         if ((stat.mode & std.c.S.IFMT) == std.c.S.IFLNK) {
-            var buf: [std.fs.max_path_bytes]u8 = undefined;
             const link_path = try src_dir.readLink(rel_path, &buf);
             target_dir.symLink(link_path, rel_path, .{}) catch |err| {
                 // this can happen if the symlink was not removed as it pointed
@@ -85,16 +93,17 @@ pub fn copyStructure(src_dir: std.fs.Dir, target_dir: std.fs.Dir, paths: anytype
             continue;
         }
 
-        // try renaming the file if we are on the same filesystem
-        // otherwise do a normal copy
-        std.fs.rename(src_dir, rel_path, target_dir, rel_path) catch |err| {
-            if (err != error.RenameAcrossMountPoints) {
-                return err;
-            }
-
-            try src_dir.copyFile(rel_path, target_dir, rel_path, .{});
-        };
+        try copyFile(src_dir, rel_path, target_dir);
     }
+}
+
+fn copyFile(src_dir: std.fs.Dir, rel_path: []const u8, target_dir: std.fs.Dir) !void {
+    // try renaming the file if we are on the same filesystem
+    // otherwise do a normal copy
+    std.fs.rename(src_dir, rel_path, target_dir, rel_path) catch |err| {
+        if (err != error.RenameAcrossMountPoints) return err;
+        try src_dir.copyFile(rel_path, target_dir, rel_path, .{});
+    };
 }
 
 pub fn readLink(fd: std.c.fd_t, outBuf: *[std.fs.max_path_bytes]u8) ![]const u8 {
