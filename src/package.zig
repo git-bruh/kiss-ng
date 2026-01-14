@@ -864,7 +864,7 @@ pub const Package = struct {
                 return false;
             };
             system_etcsums = try read_until_end(self.allocator, system_pkg.?.dir, "etcsums");
-            var etcsums_it = std.mem.splitScalar(u8, system_etcsums.?, '\n');
+            var etcsums_it = std.mem.splitScalar(u8, system_etcsums orelse "", '\n');
             var it = std.mem.splitScalar(u8, sliceTillWhitespace(system_manifest.?), '\n');
             while (it.next()) |path| {
                 if (std.mem.startsWith(u8, path, "/etc")) {
