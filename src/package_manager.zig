@@ -155,23 +155,22 @@ pub const PackageManager = struct {
             if (pkg.implicit and try pkg.has_existing_binary()) {
                 std.log.info("({d}/{d}) installing existing binary for package {ks}", .{ idx + 1, sorted.items.len - 1, pkg.name });
                 if (!try pkg.install(&self.kiss_config)) return false;
-                continue;
+            } else {
+                std.log.info("({d}/{d}) building package {ks}", .{ idx + 1, sorted.items.len - 1, pkg.name });
+
+                if (!try pkg.build(&self.kiss_config, &installed_pkg_map)) return false;
+
+                std.log.info("successfully built {ks}", .{pkg.name});
+                if (pkg.implicit) {
+                    std.log.info("{ks} needed as dependency, installing", .{pkg.name});
+                    if (!try pkg.install(&self.kiss_config)) return false;
+                }
             }
 
-            std.log.info("({d}/{d}) building package {ks}", .{ idx + 1, sorted.items.len - 1, pkg.name });
-
-            if (!try pkg.build(&self.kiss_config, &installed_pkg_map)) return false;
-
-            std.log.info("successfully built {ks}", .{pkg.name});
-            if (pkg.implicit) {
-                std.log.info("{ks} needed as dependency, installing", .{pkg.name});
-                if (!try pkg.install(&self.kiss_config)) return false;
-
-                // must remove entry as the existing FDs are now invalid
-                var installed_pkg = installed_pkg_map.get(pkg.name) orelse continue;
-                _ = installed_pkg_map.remove(pkg.name);
-                installed_pkg.free();
-            }
+            // must remove entry as the existing FDs are now invalid
+            var installed_pkg = installed_pkg_map.get(pkg.name) orelse continue;
+            _ = installed_pkg_map.remove(pkg.name);
+            installed_pkg.free();
         }
 
         return true;
@@ -237,13 +236,12 @@ pub const PackageManager = struct {
             if (try pkg.has_existing_binary()) {
                 std.log.info("({d}/{d}) installing existing binary for package {ks}", .{ idx + 1, sorted.items.len - 1, pkg.name });
                 if (!try pkg.install(&self.kiss_config)) return false;
-                continue;
+            } else {
+                std.log.info("({d}/{d}) building package {ks}", .{ idx + 1, sorted.items.len - 1, pkg.name });
+
+                if (!try pkg.build(&self.kiss_config, &installed_pkg_map)) return false;
+                if (!try pkg.install(&self.kiss_config)) return false;
             }
-
-            std.log.info("({d}/{d}) building package {ks}", .{ idx + 1, sorted.items.len - 1, pkg.name });
-
-            if (!try pkg.build(&self.kiss_config, &installed_pkg_map)) return false;
-            if (!try pkg.install(&self.kiss_config)) return false;
 
             // must remove entry as the existing FDs are now invalid
             var installed_pkg = installed_pkg_map.get(pkg.name) orelse continue;
