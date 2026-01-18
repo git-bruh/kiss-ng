@@ -7,6 +7,7 @@ The project currently supports almost all of the KISS features and can act as a 
 - The package manager is invoked as root for build (`b`), install (`i`) and upgrade (`U`) operations due to the sandboxing mechanism
 
 - Build scripts cannot access the network, packages must be refactored to support vendored / pre-cached dependencies
+  - `KISS_SANDBOX_FILES` is a space-delimited list of extra files that must be mounted inside the sandbox, this is to support use-cases like ccache
 
 - All binaries, sources, and logs are stored at `/var/cache/kiss` instead of the cache directory under `$HOME`
 
@@ -81,3 +82,4 @@ $ kiss_ng
   - [x] `KISS_KEEPLOG`
   - [x] `KISS_PROMPT`
   - [x] ~~`KISS_TMPDIR`~~ does not fit with sandboxing logic
+  - [x] KISS_SANDBOX_FILES

@@ -13,6 +13,10 @@ pub const Config = struct {
     /// KISS_PATH
     /// path for searching KISS packages
     path: []const u8,
+    /// KISS_SANDBOX_FILES
+    /// files to bind mount to the sandbox (eg. for ccache/distcc/icecream)
+    files: ?[]const u8,
+    sandbox_files: std.ArrayList([]const u8),
     /// KISS_ROOT
     /// path for installing KISS packages
     root: ?[]const u8,
@@ -48,6 +52,18 @@ pub const Config = struct {
         });
         errdefer allocator.free(path);
 
+        var sandbox_files: std.ArrayList([]const u8) = .{};
+        errdefer sandbox_files.deinit(allocator);
+
+        try sandbox_files.appendSlice(allocator, &.{ CACHE_PATH, DB_PATH, "/dev", "/sys", "/proc" });
+        const files = std.process.getEnvVarOwned(allocator, "KISS_SANDBOX_FILES") catch |err| switch (err) {
+            error.EnvironmentVariableNotFound => null,
+            else => return err,
+        };
+        errdefer if (files != null) allocator.free(files.?);
+        var it = std.mem.splitScalar(u8, files orelse "", ' ');
+        while (it.next()) |file| if (file.len > 0) try sandbox_files.append(allocator, file);
+
         const debug = std.posix.getenv("KISS_DEBUG");
         const strip = std.posix.getenv("KISS_STRIP");
         const prompt = std.posix.getenv("KISS_PROMPT");
@@ -57,6 +73,8 @@ pub const Config = struct {
         return Config{
             .allocator = allocator,
             .path = path,
+            .files = files,
+            .sandbox_files = sandbox_files,
             .root = root,
             // defaults to false
             .debug = (debug != null and debug.?[0] == '1'),
@@ -191,6 +209,8 @@ pub const Config = struct {
 
     pub fn free(self: *Config) void {
         self.allocator.free(self.path);
+        self.sandbox_files.deinit(self.allocator);
         if (self.root != null) self.allocator.free(self.root.?);
+        if (self.files != null) self.allocator.free(self.files.?);
     }
 };

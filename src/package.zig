@@ -424,8 +424,7 @@ pub const Package = struct {
                 return;
             }
 
-            const paths: []const []const u8 = &.{ config.CACHE_PATH, config.DB_PATH, "/dev", "/sys", "/proc" };
-            for (paths) |dir| {
+            for (kiss_config.sandbox_files.items) |dir| {
                 var sandbox_buf: [std.fs.max_path_bytes]u8 = undefined;
                 const sandbox_dir_path = try std.fmt.bufPrint(&sandbox_buf, "{s}/{s}", .{ sysroot_dir_path, dir });
 
@@ -434,6 +433,13 @@ pub const Package = struct {
 
                 const dir_c = std.posix.toPosixPath(dir) catch unreachable;
                 const sandbox_dir_c = std.posix.toPosixPath(sandbox_dir_path) catch unreachable;
+
+                const stat = try std.fs.cwd().statFile(dir);
+                if (stat.kind != .directory) {
+                    try std.fs.cwd().deleteDir(sandbox_dir_path);
+                    const file = try std.fs.cwd().createFile(sandbox_dir_path, .{});
+                    file.close();
+                }
 
                 const mount_err = std.posix.errno(mount.mount(
                     &dir_c,
