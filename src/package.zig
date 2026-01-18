@@ -293,13 +293,9 @@ pub const Package = struct {
         const is_main_pkg = visited_packages.count() == 0;
 
         if (is_main_pkg) {
-            const base_pkgs: []const []const u8 = &.{ "baselayout", "busybox", "gcc", "git", "gnugrep", "linux-headers", "make", "musl", "pkgconf", "util-linux" };
-            for (base_pkgs) |pkg| {
-                if (visited_packages.contains(pkg)) continue;
-                try visited_packages.put(pkg, {});
-                const system_pkg = try self.get_dependency_file_tree(arena, kiss_config, installed_pkg_map, files_map, pkg);
-                try system_pkg.get_dependencies_file_tree(arena, kiss_config, visited_packages, installed_pkg_map, files_map);
-            }
+            try visited_packages.put("base", {});
+            const system_pkg = try self.get_dependency_file_tree(arena, kiss_config, installed_pkg_map, files_map, "base");
+            try system_pkg.get_dependencies_file_tree(arena, kiss_config, visited_packages, installed_pkg_map, files_map);
         }
 
         for (self.dependencies.items) |dependency| {

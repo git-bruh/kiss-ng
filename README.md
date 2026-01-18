@@ -10,6 +10,8 @@ The project currently supports almost all of the KISS features and can act as a 
 
 - All binaries, sources, and logs are stored at `/var/cache/kiss` instead of the cache directory under `$HOME`
 
+- A dummy package called `base` must be installed, with `depends` containing all essential packages (eg. `baselayout busybox gcc git linux-headers make musl pkgconf`), this is not hardcoded to support various configurations (eg. `clang`-only system)
+
 # Usage
 
 ```sh
