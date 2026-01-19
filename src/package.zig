@@ -869,16 +869,17 @@ pub const Package = struct {
             var etcsums_it = std.mem.splitScalar(u8, system_etcsums orelse "", '\n');
             var it = std.mem.splitScalar(u8, sliceTillWhitespace(system_manifest.?), '\n');
             while (it.next()) |path| {
-                if (std.mem.startsWith(u8, path, "/etc")) {
+                // ignore directories (trailing slash)
+                if (std.mem.startsWith(u8, path, "/etc") and !std.mem.endsWith(u8, path, "/")) {
                     const rel_path = path[1..];
-                    const stat = try root_dir.statFile(rel_path);
-                    if (stat.kind == .directory) continue;
+                    const stat = try std.posix.fstatat(root_dir.fd, rel_path, std.c.AT.SYMLINK_NOFOLLOW);
+                    const is_symlink = ((stat.mode & std.c.S.IFMT) == std.c.S.IFLNK);
 
                     const package_etcsum = etcsums_it.next() orelse {
                         std.log.err("no etcsums found for file {s}", .{path});
                         return false;
                     };
-                    const file = try root_dir.openFile(if (stat.kind == .file) rel_path else "/dev/null", .{});
+                    const file = try root_dir.openFile(if (!is_symlink) rel_path else "/dev/null", .{});
                     defer file.close();
                     const system_etcsum = try checksum.b3sum(file);
                     try etcsums_map.putNoClobber(path, .{
@@ -998,14 +999,16 @@ pub const Package = struct {
         it.reset();
         // we do this after regeneration of the manifest as .new files shouldn't be part of it
         while (it.next()) |path| {
-            if (!std.mem.startsWith(u8, path, "/etc")) continue;
+            if (!std.mem.startsWith(u8, path, "/etc") or std.mem.endsWith(u8, path, "/")) continue;
+
             const rel_path = path[1..];
-            const stat = try extract_dir.statFile(rel_path);
+            const stat = try std.posix.fstatat(extract_dir.fd, rel_path, std.c.AT.SYMLINK_NOFOLLOW);
+            const is_symlink = ((stat.mode & std.c.S.IFMT) == std.c.S.IFLNK);
             const etcsums = etcsums_map.get(path) orelse {
                 std.log.info("etc path {ks} not in existing etcsums, does not conflict", .{path});
                 continue;
             };
-            const file = try extract_dir.openFile(if (stat.kind == .file) rel_path else "/dev/null", .{});
+            const file = try extract_dir.openFile(if (!is_symlink) rel_path else "/dev/null", .{});
             defer file.close();
             const etcsum = try checksum.b3sum(file);
             if (std.mem.eql(u8, &etcsums.package_etcsum, &etcsums.system_etcsum)) {
