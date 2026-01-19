@@ -137,7 +137,8 @@ pub fn extract(dir: std.fs.Dir, file: std.fs.File, prefer_strip_components: bool
         const flags = libarchive.ARCHIVE_EXTRACT_SECURE_SYMLINKS |
             libarchive.ARCHIVE_EXTRACT_SECURE_NODOTDOT |
             libarchive.ARCHIVE_EXTRACT_NO_OVERWRITE |
-            libarchive.ARCHIVE_EXTRACT_TIME;
+            libarchive.ARCHIVE_EXTRACT_TIME |
+            libarchive.ARCHIVE_EXTRACT_PERM;
         while (true) {
             check(archive, libarchive.archive_read_extract(archive, entry, flags)) catch |err| {
                 if (err == ArchiveError.Retry) continue;
