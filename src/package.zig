@@ -700,6 +700,7 @@ pub const Package = struct {
 
         try stdout_writer.interface.flush();
         try stderr_writer.interface.flush();
+        try log_writer.interface.flush();
 
         const term = try child.wait();
         if (term != .Exited or term.Exited != 0) {
