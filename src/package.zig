@@ -1084,7 +1084,7 @@ pub const Package = struct {
 
         var buf: [std.fs.max_path_bytes]u8 = undefined;
         const pre_remove_hook = try config.Config.get_hook_path(self.name, "pre-remove", &buf);
-        chrootAndExecHook(kiss_config.root orelse "/", pre_remove_hook);
+        if (!upgrading) chrootAndExecHook(kiss_config.root orelse "/", pre_remove_hook);
 
         var it = std.mem.splitScalar(u8, manifest, '\n');
         var etcsums_it = std.mem.splitScalar(u8, etcsums orelse "", '\n');
