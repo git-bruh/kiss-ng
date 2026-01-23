@@ -447,6 +447,7 @@ pub const Package = struct {
             try sysroot_dir.symLink("/proc/self/fd/1", "dev/stdout", .{});
             try sysroot_dir.symLink("/proc/self/fd/2", "dev/stderr", .{});
             try sysroot_dir.symLink("/proc/self/fd", "dev/fd", .{});
+            try sysroot_dir.makeDir("dev/shm");
             const proc_c = std.posix.toPosixPath("proc") catch unreachable;
             const sandbox_dir_proc_c = std.posix.toPosixPath(try std.fmt.bufPrint(&sandbox_buf, "{s}/proc", .{sysroot_dir_path})) catch unreachable;
             const mount_err = std.posix.errno(mount.mount(&proc_c, &sandbox_dir_proc_c, &proc_c, mount.MS_NOSUID | mount.MS_NOEXEC | mount.MS_NODEV, null));
