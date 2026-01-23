@@ -55,7 +55,17 @@ pub const Config = struct {
         var sandbox_files: std.ArrayList([]const u8) = .{};
         errdefer sandbox_files.deinit(allocator);
 
-        try sandbox_files.appendSlice(allocator, &.{ CACHE_PATH, DB_PATH, "/dev", "/sys", "/proc" });
+        try sandbox_files.appendSlice(allocator, &.{
+            CACHE_PATH,
+            DB_PATH,
+            "/dev/full",
+            "/dev/null",
+            "/dev/random",
+            "/dev/tty",
+            "/dev/urandom",
+            "/dev/zero",
+            "/dev/pts",
+        });
         const files = std.process.getEnvVarOwned(allocator, "KISS_SANDBOX_FILES") catch |err| switch (err) {
             error.EnvironmentVariableNotFound => null,
             else => return err,
@@ -136,49 +146,49 @@ pub const Config = struct {
         return try cache_dir.openDir(path, .{});
     }
 
-    pub fn get_proc_log_file(log_dir: std.fs.Dir, pkg_name: []const u8) !std.fs.File {
+    pub fn get_proc_log_file(pid: std.os.linux.pid_t, log_dir: std.fs.Dir, pkg_name: []const u8) !std.fs.File {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const path = try std.fmt.bufPrint(&buf, "{s}-{d}", .{ pkg_name, std.os.linux.getpid() });
+        const path = try std.fmt.bufPrint(&buf, "{s}-{d}", .{ pkg_name, pid });
         return try log_dir.createFile(path, .{});
     }
 
-    pub fn rm_proc_log_file(self: *const Config, log_dir: std.fs.Dir, pkg_name: []const u8) !void {
+    pub fn rm_proc_log_file(self: *const Config, pid: std.os.linux.pid_t, log_dir: std.fs.Dir, pkg_name: []const u8) !void {
         if (!self.debug and !self.keeplog) {
             var buf: [std.fs.max_path_bytes]u8 = undefined;
-            const path = try std.fmt.bufPrint(&buf, "{s}-{d}", .{ pkg_name, std.os.linux.getpid() });
+            const path = try std.fmt.bufPrint(&buf, "{s}-{d}", .{ pkg_name, pid });
             return try log_dir.deleteFile(path);
         }
     }
 
-    pub fn get_proc_build_dir() !std.fs.Dir {
+    pub fn get_proc_build_dir(pid: std.os.linux.pid_t) !std.fs.Dir {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const path = try std.fmt.bufPrint(&buf, "{s}/{d}/build", .{ CACHE_PATH ++ "/proc", std.os.linux.getpid() });
+        const path = try std.fmt.bufPrint(&buf, "{s}/{d}/build", .{ CACHE_PATH ++ "/proc", pid });
 
         return try fs.mkdirParents(null, path);
     }
 
-    pub fn get_proc_pkg_dir() !std.fs.Dir {
+    pub fn get_proc_pkg_dir(pid: std.os.linux.pid_t) !std.fs.Dir {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const path = try std.fmt.bufPrint(&buf, "{s}/{d}/pkg", .{ CACHE_PATH ++ "/proc", std.os.linux.getpid() });
+        const path = try std.fmt.bufPrint(&buf, "{s}/{d}/pkg", .{ CACHE_PATH ++ "/proc", pid });
 
         return try fs.mkdirParents(null, path);
     }
 
-    pub fn get_proc_sysroot_dir() !std.fs.Dir {
+    pub fn get_proc_sysroot_dir(pid: std.os.linux.pid_t) !std.fs.Dir {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const path = try std.fmt.bufPrint(&buf, "{s}/{d}/sysroot", .{ CACHE_PATH ++ "/proc", std.os.linux.getpid() });
+        const path = try std.fmt.bufPrint(&buf, "{s}/{d}/sysroot", .{ CACHE_PATH ++ "/proc", pid });
 
         return try fs.mkdirParents(null, path);
     }
 
     // cleans build & package directories
-    pub fn rm_proc_dir(self: *const Config) !void {
+    pub fn rm_proc_dir(self: *const Config, pid: std.os.linux.pid_t) !void {
         if (!self.debug) {
             var dir = try std.fs.openDirAbsolute(CACHE_PATH ++ "/proc", .{});
             defer dir.close();
 
             var buf: [std.fs.max_path_bytes]u8 = undefined;
-            try dir.deleteTree(try std.fmt.bufPrint(&buf, "{d}", .{std.os.linux.getpid()}));
+            try dir.deleteTree(try std.fmt.bufPrint(&buf, "{d}", .{pid}));
         }
     }
 

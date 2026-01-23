@@ -75,14 +75,13 @@ pub const Landlock = struct {
         }, 0) };
     }
 
+    // must only be called on files
     pub fn add_rule(self: *const Landlock, fd: std.posix.fd_t, perms: c_ulonglong) !void {
-        const stat = try std.posix.fstat(fd);
-
         const path_beneath: landlock.landlock_path_beneath_attr = .{
             .parent_fd = fd,
             // exclude file-specific flags in-case of a directory
             // otherwise, only preserve file-specific flags
-            .allowed_access = if ((stat.mode & std.c.S.IFMT) == std.c.S.IFDIR) (perms & ~ALL_FILE_PERMS) else (perms & ALL_FILE_PERMS),
+            .allowed_access = perms & ALL_FILE_PERMS,
         };
 
         try landlock_add_rule(self.handle, landlock.LANDLOCK_RULE_PATH_BENEATH, &path_beneath, 0);

@@ -9,6 +9,7 @@ const unistd = @cImport(@cInclude("unistd.h"));
 const sched = @cImport({
     @cDefine("_GNU_SOURCE", {});
     @cInclude("sched.h");
+    @cInclude("linux/sched.h");
 });
 const mount = @cImport(@cInclude("sys/mount.h"));
 const elf = @import("utils/elf.zig");
@@ -283,6 +284,7 @@ pub const Package = struct {
 
         var manifest_iter = std.mem.splitScalar(u8, manifest.?, '\n');
         while (manifest_iter.next()) |path| {
+            if (path.len == 0) continue;
             try files_map.put(path, {});
         }
 
@@ -316,26 +318,21 @@ pub const Package = struct {
         signal.block_sigint();
         defer signal.unblock_sigint();
 
-        defer kiss_config.rm_proc_dir() catch |err| std.log.err("failed to clean build directory: {}", .{err});
+        defer kiss_config.rm_proc_dir(std.os.linux.getpid()) catch |err| std.log.err("failed to clean build directory: {}", .{err});
 
-        var ret: bool = undefined;
-        const thread = try std.Thread.spawn(.{}, Package.build_inner, .{ self, kiss_config, installed_pkg_map, &ret });
-        thread.join();
-        return ret;
+        return try forkAndExec(
+            std.os.linux.CLONE.NEWNS | std.os.linux.CLONE.NEWPID,
+            Package.build_inner,
+            .{ self, std.os.linux.getpid(), kiss_config, installed_pkg_map },
+        ) == 0;
     }
 
-    fn build_inner(self: *const Package, kiss_config: *const config.Config, installed_pkg_map: *std.StringHashMap(Package), ret: *bool) !void {
+    fn build_inner(self: *const Package, pid: std.os.linux.pid_t, kiss_config: *const config.Config, installed_pkg_map: *std.StringHashMap(Package)) !u8 {
         var landlock = try sandbox.Landlock.init();
         defer landlock.deinit();
 
-        // ensure we can always enumerate directories at any path, but not access files
         try landlock.add_rule_at_path("/", sandbox.Permissions.ReadDir);
-
-        // basic paths
         try landlock.add_rule_at_path(".", sandbox.Permissions.Read);
-        try landlock.add_rule_at_path("/proc", sandbox.Permissions.Read | sandbox.Permissions.Write | sandbox.Permissions.Execute);
-        try landlock.add_rule_at_path("/dev", sandbox.Permissions.Read | sandbox.Permissions.Write | sandbox.Permissions.Execute);
-        try landlock.add_rule_at_path("/tmp", sandbox.Permissions.Read | sandbox.Permissions.Write | sandbox.Permissions.Execute);
 
         // write access for creating archives
         try landlock.add_rule_at_path(config.CACHE_PATH ++ "/bin", sandbox.Permissions.Write);
@@ -348,14 +345,14 @@ pub const Package = struct {
         // read & execute access for repository dir (executing build script)
         try landlock.add_rule_with_children(self.dir.fd, sandbox.Permissions.Read | sandbox.Permissions.Execute);
 
-        var sysroot_dir = try config.Config.get_proc_sysroot_dir();
+        var sysroot_dir = try config.Config.get_proc_sysroot_dir(pid);
         defer sysroot_dir.close();
 
         var buf: [std.fs.max_path_bytes]u8 = undefined;
         const sysroot_dir_path = try fs.readLink(sysroot_dir.fd, &buf);
 
         var inBuf: [std.fs.max_path_bytes]u8 = undefined;
-        const build_file_path = try self.copyBuildScript(config.CACHE_PATH ++ "/proc", &inBuf);
+        const build_file_path = try self.copyBuildScript(pid, config.CACHE_PATH ++ "/proc", &inBuf);
 
         // allow access to read all files provided by dependencies
         {
@@ -377,21 +374,22 @@ pub const Package = struct {
 
             var it = files_map.keyIterator();
             while (it.next()) |path| {
-                const fd = std.posix.open(path.*, .{}, 0) catch |err| {
+                if (path.len == 0) {
+                    std.log.err("got empty path in manifest", .{});
+                    return 1;
+                }
+                files.appendAssumeCapacity(path.*);
+                // XXX we must not set the rules for directories as that implicitly
+                // grants access to all paths under it
+                if (path.*[path.len - 1] == '/') continue;
+                const fd = std.posix.open(path.*, .{ .NOFOLLOW = true, .PATH = true }, 0) catch |err| {
                     std.log.warn("failed to open path {ks} for landlock: {}", .{ path.*, err });
                     continue;
                 };
                 defer std.posix.close(fd);
 
-                // TODO skip fstat
                 try landlock.add_rule(fd, sandbox.Permissions.Read | sandbox.Permissions.Execute);
-                files.appendAssumeCapacity(path.*);
             }
-
-            // we need to enumerate installed packages for dependency detection
-            var installed_dir = try kiss_config.get_installed_dir();
-            defer installed_dir.close();
-            try landlock.add_rule_with_children(installed_dir.fd, sandbox.Permissions.Read);
 
             // sort files in ascending order so directories come before files
             std.mem.sort([]const u8, files.items, {}, struct {
@@ -402,7 +400,6 @@ pub const Package = struct {
 
             // for some reason we get EXDEV after landlock enforcement
             for (files.items) |path| {
-                if (path.len == 0) @panic("got empty path in manifest");
                 if (path[path.len - 1] == '/') {
                     sysroot_dir.makeDir(path[1..path.len]) catch |err| {
                         if (err != error.PathAlreadyExists) return err;
@@ -417,15 +414,8 @@ pub const Package = struct {
                 }
             }
 
-            const unshare_err = std.posix.errno(sched.unshare(sched.CLONE_NEWNS));
-            if (unshare_err != .SUCCESS) {
-                std.log.err("failed to unshare(): {}", .{unshare_err});
-                ret.* = false;
-                return;
-            }
-
+            var sandbox_buf: [std.fs.max_path_bytes]u8 = undefined;
             for (kiss_config.sandbox_files.items) |dir| {
-                var sandbox_buf: [std.fs.max_path_bytes]u8 = undefined;
                 const sandbox_dir_path = try std.fmt.bufPrint(&sandbox_buf, "{s}/{s}", .{ sysroot_dir_path, dir });
 
                 var sandbox_dir = try fs.mkdirParents(null, sandbox_dir_path);
@@ -450,18 +440,28 @@ pub const Package = struct {
                 ));
                 if (mount_err != .SUCCESS) {
                     std.log.err("failed to mount({s}) at {s}: {}", .{ dir, sandbox_dir_path, mount_err });
-                    ret.* = false;
-                    return;
+                    return 1;
                 }
+            }
+            try sysroot_dir.symLink("/proc/self/fd/0", "dev/stdin", .{});
+            try sysroot_dir.symLink("/proc/self/fd/1", "dev/stdout", .{});
+            try sysroot_dir.symLink("/proc/self/fd/2", "dev/stderr", .{});
+            try sysroot_dir.symLink("/proc/self/fd", "dev/fd", .{});
+            const proc_c = std.posix.toPosixPath("proc") catch unreachable;
+            const sandbox_dir_proc_c = std.posix.toPosixPath(try std.fmt.bufPrint(&sandbox_buf, "{s}/proc", .{sysroot_dir_path})) catch unreachable;
+            const mount_err = std.posix.errno(mount.mount(&proc_c, &sandbox_dir_proc_c, &proc_c, mount.MS_NOSUID | mount.MS_NOEXEC | mount.MS_NODEV, null));
+            if (mount_err != .SUCCESS) {
+                std.log.err("failed to mount(/proc): {}", .{mount_err});
+                return 1;
             }
 
             try landlock.enforce();
         }
 
-        var build_dir = try config.Config.get_proc_build_dir();
+        var build_dir = try config.Config.get_proc_build_dir(pid);
         defer build_dir.close();
 
-        // must extract sources before unshare() + chroot() as we have to access
+        // must extract sources before chroot() as we have to access
         // user-defined directories
         for (self.sources.items) |source| switch (source) {
             .Git => |git| {
@@ -512,20 +512,19 @@ pub const Package = struct {
         const chroot_err = std.posix.errno(unistd.chroot(&sysroot_dir_path_c));
         if (chroot_err != .SUCCESS) {
             std.log.err("failed to chroot({s}: {}", .{ sysroot_dir_path, chroot_err });
-            ret.* = false;
-            return;
+            return 1;
         }
 
-        var pkg_dir = try config.Config.get_proc_pkg_dir();
+        var pkg_dir = try config.Config.get_proc_pkg_dir(pid);
         defer pkg_dir.close();
 
         var log_dir = try config.Config.get_log_dir();
         defer log_dir.close();
 
-        var log_file = try config.Config.get_proc_log_file(log_dir, self.name);
+        var log_file = try config.Config.get_proc_log_file(pid, log_dir, self.name);
         defer log_file.close();
 
-        var chrooted_build_dir = try config.Config.get_proc_build_dir();
+        var chrooted_build_dir = try config.Config.get_proc_build_dir(pid);
         defer chrooted_build_dir.close();
 
         // create empty /var/db/kiss/installed in build directory
@@ -534,10 +533,7 @@ pub const Package = struct {
             dir.close();
         }
 
-        if (!try self.execBuildScript(chrooted_build_dir, pkg_dir, log_file, build_file_path)) {
-            ret.* = false;
-            return;
-        }
+        if (!try self.execBuildScript(chrooted_build_dir, pkg_dir, log_file, build_file_path)) return 1;
 
         const no_strip = blk: {
             build_dir.access("nostrip", .{}) catch |err| {
@@ -548,7 +544,7 @@ pub const Package = struct {
         };
 
         // only delete log file on successful build
-        kiss_config.rm_proc_log_file(log_dir, self.name) catch |err| {
+        kiss_config.rm_proc_log_file(pid, log_dir, self.name) catch |err| {
             std.log.err("failed to clean log file: {}", .{err});
         };
 
@@ -624,15 +620,15 @@ pub const Package = struct {
         bin_dir.deleteFile(path[1..path.len]) catch |err| if (err != error.FileNotFound) return err;
         try bin_dir.rename(path, path[1..path.len]);
 
-        ret.* = true;
+        return 0;
     }
 
-    fn copyBuildScript(self: *const Package, tmpdir: []const u8, buf: *[std.fs.max_path_bytes]u8) ![]u8 {
+    fn copyBuildScript(self: *const Package, pid: std.os.linux.pid_t, tmpdir: []const u8, buf: *[std.fs.max_path_bytes]u8) ![]u8 {
         var outBuf: [std.fs.max_path_bytes]u8 = undefined;
 
         const repo_path = try fs.readLink(self.dir.fd, buf);
         const build_file_path = try std.fmt.bufPrint(&outBuf, "{s}/build", .{repo_path});
-        const tmp_file_path = try std.fmt.bufPrint(buf, "{s}/{d}/script", .{ tmpdir, std.os.linux.getpid() });
+        const tmp_file_path = try std.fmt.bufPrint(buf, "{s}/{d}/script", .{ tmpdir, pid });
 
         try std.fs.copyFileAbsolute(build_file_path, tmp_file_path, .{});
         return tmp_file_path;
@@ -1296,34 +1292,59 @@ fn sliceNameFromUrl(url: []const u8) []const u8 {
     return url[(std.mem.lastIndexOfScalar(u8, url, '/') orelse unreachable) + 1 .. url.len];
 }
 
-fn chrootAndExecHook(root: []const u8, path: []const u8) void {
-    const pid = std.c.fork();
-    const pid_err = std.posix.errno(pid);
-    if (pid_err != .SUCCESS) {
-        std.log.err("failed to fork(): {}", .{pid_err});
-        @panic("fork() failed");
-    }
+fn chrootAndExecHook(root_dir: []const u8, file_path: []const u8) void {
+    switch (forkAndExec(0, struct {
+        fn f(root: []const u8, path: []const u8) !u8 {
+            const c_root = std.posix.toPosixPath(root) catch @panic("path too long");
+            const chroot_err = std.posix.errno(unistd.chroot(&c_root));
+            if (chroot_err != .SUCCESS) {
+                std.log.err("failed to chroot({s}): {}", .{ root, chroot_err });
+                return 1;
+            }
 
-    if (pid == 0) {
-        const c_root = std.posix.toPosixPath(root) catch @panic("path too long");
-        const chroot_err = std.posix.errno(unistd.chroot(&c_root));
-        if (chroot_err != .SUCCESS) {
-            std.log.err("failed to chroot({s}): {}", .{ root, chroot_err });
-            std.process.exit(1);
+            const c_path = std.posix.toPosixPath(path) catch @panic("path too long");
+            std.log.err("failed to execve({s}): {}", .{ path, std.posix.execveZ(&c_path, &.{ &c_path, null }, std.c.environ) });
+            return 1;
         }
+    }.f, .{ root_dir, file_path }) catch |err| {
+        std.debug.panic("failed to clone(): {}", .{err});
+    }) {
+        0 => std.log.info("successfully executed hook at {ks} in {ks}", .{ file_path, root_dir }),
+        else => |status| std.log.warn("failed to execute hook at {ks} in {ks}: {d}, continuing", .{ file_path, root_dir, status }),
+    }
+}
 
-        const c_path = std.posix.toPosixPath(path) catch @panic("path too long");
-        std.log.err("failed to execve({s}): {}", .{ path, std.posix.execveZ(&c_path, &.{ &c_path, null }, std.c.environ) });
-        std.process.exit(1);
-    } else {
-        var status: u32 = 0;
-        _ = std.os.linux.waitpid(-1, &status, 0);
-        status = (status & 0xff00) >> 8;
-
-        if (status == 0) {
-            std.log.info("successfully executed hook at {ks} in {ks}", .{ path, root });
-        } else {
-            std.log.warn("failed to execute hook at {ks} in {ks}: {d}, continuing", .{ path, root, status });
+fn forkAndExec(flags: u32, comptime f: anytype, args: anytype) !u8 {
+    const pid = std.os.linux.syscall2(.clone3, @intFromPtr(&sched.clone_args{
+        .flags = flags,
+        .pidfd = 0,
+        .child_tid = 0,
+        .parent_tid = 0,
+        .exit_signal = std.os.linux.SIG.CHLD,
+        .tls = 0,
+        .set_tid = 0,
+        .set_tid_size = 0,
+        .cgroup = 0,
+    }), @sizeOf(sched.clone_args));
+    if (pid == 0) {
+        std.c._exit(@call(.auto, f, args) catch |err| {
+            std.debug.print("error: {s}\n", .{@errorName(err)});
+            if (@errorReturnTrace()) |trace| {
+                std.debug.dumpStackTrace(trace.*);
+            }
+            std.c._exit(1);
+        });
+    }
+    switch (std.os.linux.E.init(pid)) {
+        .SUCCESS => {},
+        else => |err| return std.posix.unexpectedErrno(err),
+    }
+    while (true) {
+        const ret = std.posix.waitpid(@intCast(pid), 0);
+        if (std.posix.W.IFEXITED(ret.status)) return std.posix.W.EXITSTATUS(ret.status);
+        if (std.posix.W.IFSIGNALED(ret.status)) {
+            std.log.err("process {} terminated by signal {}", .{ pid, std.posix.W.TERMSIG(ret.status) });
+            return 1;
         }
     }
 }
