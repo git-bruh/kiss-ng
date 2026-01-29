@@ -328,6 +328,14 @@ pub const Package = struct {
     }
 
     fn build_inner(self: *const Package, pid: std.os.linux.pid_t, kiss_config: *const config.Config, installed_pkg_map: *std.StringHashMap(Package)) !u8 {
+        switch (std.posix.errno(mount.mount("none", "/", null, mount.MS_REC | mount.MS_PRIVATE, null))) {
+            .SUCCESS => {},
+            else => |err| {
+                std.log.err("failed to mark / as private: {}", .{err});
+                return 1;
+            },
+        }
+
         var landlock = try sandbox.Landlock.init();
         defer landlock.deinit();
 
